@@ -313,35 +313,6 @@ def callout(title, lines, accent=AMBER_EDGE, background=AMBER_BG):
     return table
 
 
-def url_block(url):
-    """The download address, shown in full.
-
-    A bare <link> renders as styled words with the address hidden, which is
-    no use to someone reading this on paper or typing it into a browser.
-    """
-    table = Table(
-        [[Paragraph(
-            f'<link href="{url}"><font face="Consolas" size="9.4" '
-            f'color="#2563EB">{url}</font></link>',
-            S["step"],
-        )]],
-        colWidths=[CONTENT_W],
-    )
-    table.setStyle(
-        TableStyle(
-            [
-                ("BACKGROUND", (0, 0), (-1, -1), BLUE_BG),
-                ("LINEBEFORE", (0, 0), (0, -1), 3, BLUE),
-                ("LEFTPADDING", (0, 0), (-1, -1), 13),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 13),
-                ("TOPPADDING", (0, 0), (-1, -1), 10),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-            ]
-        )
-    )
-    return table
-
-
 def code_block(text):
     table = Table([[Paragraph(text, S["code"])]], colWidths=[CONTENT_W])
     table.setStyle(
@@ -481,8 +452,7 @@ def build_story():
     )
 
     story.append(h3("Step 1 — Download the app"))
-    story.append(para("Go to the CRM download page:"))
-    story.append(url_block(RELEASES_URL))
+    story.append(para(f"Go to the {link('CRM Portal download page', RELEASES_URL)}."))
     story.append(Spacer(1, 11))
     story.append(
         steps(
