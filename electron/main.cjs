@@ -60,8 +60,12 @@ function waitForServer(host, port, timeoutMs = 15000) {
   });
 }
 
+// Only binds the port if nothing is already listening on it. Without this guard, launching a
+// second copy of the app — or having a leftover dev server on the same port — crashes the whole
+// app with EADDRINUSE instead of just reusing what's already there.
 async function ensureServer() {
   if (httpServer) return;
+  if (await isPortOpen(HOST, PORT, 300)) return;
   httpServer = await startServer({ entry: ENTRY, port: PORT });
 }
 

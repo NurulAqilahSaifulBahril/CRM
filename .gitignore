@@ -4,3 +4,4 @@
 
 node_modules/
 /release/
+.claude/scheduled_tasks.lock
