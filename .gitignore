@@ -1,0 +1,6 @@
+# Server-side secrets (Postgres proxy token). Must never be committed —
+# holds full read/write SQL access to the production database.
+.env.local
+
+node_modules/
+/release/

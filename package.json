@@ -1,0 +1,50 @@
+{
+  "name": "eternalgy-case-hub",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "desktop": "electron .",
+    "dist:win": "node scripts/build-installer.cjs",
+    "pack:win": "node scripts/build-installer.cjs --dir"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.nurulaqilah.casehub",
+    "productName": "Eternalgy Case Hub",
+    "asar": false,
+    "directories": {
+      "output": "C:/tmp/case-hub-release"
+    },
+    "files": [
+      "case-hub-api.html",
+      "serve.cjs",
+      "electron/**/*",
+      ".env.local",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "Case-Hub-Setup-${version}.${ext}"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "NurulAqilahSaifulBahril",
+      "repo": "CRM"
+    }
+  }
+}

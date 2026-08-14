@@ -1,0 +1,21 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "case-hub",
+      "runtimeExecutable": "C:\\PROGRA~1\\nodejs\\node.exe",
+      "runtimeArgs": ["serve.cjs", "index.html.html", "8934"],
+      "cwd": "C:\\Users\\User\\OneDrive\\Documents\\backup admin\\2. CRM",
+      "port": 8934,
+      "autoPort": false
+    },
+    {
+      "name": "case-hub-api",
+      "runtimeExecutable": "C:\\PROGRA~1\\nodejs\\node.exe",
+      "runtimeArgs": ["serve.cjs", "case-hub-api.html", "8935"],
+      "cwd": "C:\\Users\\User\\OneDrive\\Documents\\backup admin\\2. CRM",
+      "port": 8935,
+      "autoPort": false
+    }
+  ]
+}
