@@ -1,4 +1,4 @@
-"""Renders the Case Hub install & update guide to a styled PDF.
+"""Renders the CRM install & update guide to a styled PDF.
 
 Mirrors the Installation System guide — same design language (Eternalgy
 navy header, blue accent rule, Segoe UI) and the same scope: getting the
@@ -6,7 +6,7 @@ app installed and keeping it updated, nothing else.
 
     python scripts/build-user-guide.py
 
-Writes "Case Hub Desktop app_user_guide.pdf". This is deliberately NOT the
+Writes "CRM Desktop app_user_guide.pdf". This is deliberately NOT the
 whole of USER-GUIDE.md: the markdown is the full manual (sidebar sections,
 Report Center, the staff login), while this PDF is the short handout you
 give someone on day one. Only the install/update/troubleshooting material
@@ -36,9 +36,9 @@ from reportlab.platypus import (
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "Case Hub Desktop app_user_guide.pdf"
+OUT = ROOT / "CRM Desktop app_user_guide.pdf"
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 DATE_LABEL = "August 2026"
 RELEASES_URL = "https://github.com/NurulAqilahSaifulBahril/CRM/releases/latest"
 
@@ -397,7 +397,7 @@ def draw_cover_header(canvas, doc):
 
     canvas.setFillColor(colors.white)
     canvas.setFont("SegoeUI-Semibold", 25)
-    canvas.drawString(MARGIN, PAGE_H - 82, "Case Hub")
+    canvas.drawString(MARGIN, PAGE_H - 82, "CRM")
 
     canvas.setFillColor(BLUE_LIGHT)
     canvas.drawString(MARGIN, PAGE_H - 111, "Install & Update Guide")
@@ -407,7 +407,7 @@ def draw_cover_header(canvas, doc):
     canvas.drawString(
         MARGIN,
         PAGE_H - 133,
-        f"Eternalgy Case Hub \u00b7 Version {VERSION} \u00b7 {DATE_LABEL}",
+        f"Eternalgy CRM \u00b7 Version {VERSION} \u00b7 {DATE_LABEL}",
     )
     canvas.restoreState()
 
@@ -420,7 +420,7 @@ def draw_running_header(canvas, doc):
     canvas.rect(0, PAGE_H - BANNER_H - 2, PAGE_W, 2, stroke=0, fill=1)
     canvas.setFillColor(EYEBROW_ON_NAVY)
     canvas.setFont("SegoeUI-Bold", 8)
-    canvas.drawString(MARGIN, PAGE_H - 22, "ETERNALGY  CASE HUB")
+    canvas.drawString(MARGIN, PAGE_H - 22, "ETERNALGY  CRM")
     canvas.restoreState()
 
 
@@ -453,7 +453,7 @@ def build_story():
 
     story.append(
         para(
-            "A short guide for everyone using Case Hub. You install it "
+            "A short guide for everyone using CRM. You install it "
             "<b>once</b>. After that it keeps itself up to date — with "
             "nothing for you to click.",
             "lead",
@@ -481,14 +481,14 @@ def build_story():
     )
 
     story.append(h3("Step 1 — Download the app"))
-    story.append(para("Go to the Case Hub download page:"))
+    story.append(para("Go to the CRM download page:"))
     story.append(url_block(RELEASES_URL))
     story.append(Spacer(1, 11))
     story.append(
         steps(
             [
                 "Scroll down to the <b>Assets</b> list.",
-                f"Click the file starting {code('Case-Hub-Setup')} and "
+                f"Click the file starting {code('CRM-Setup')} and "
                 "ending in <b>.exe</b> to download it. Always take the "
                 "newest version the page offers.",
                 "It will go to your <b>Downloads</b> folder unless you "
@@ -515,7 +515,7 @@ def build_story():
     story.append(Spacer(1, 8))
     story.append(
         para(
-            "When it finishes you will have an <b>Eternalgy Case Hub</b> "
+            "When it finishes you will have an <b>Eternalgy CRM</b> "
             "shortcut on your desktop and in the Start Menu."
         )
     )
@@ -523,7 +523,7 @@ def build_story():
     story.append(h3("Step 3 — Open it"))
     story.append(
         para(
-            "<b>Start Menu → Eternalgy Case Hub</b> (or the desktop "
+            "<b>Start Menu → Eternalgy CRM</b> (or the desktop "
             "shortcut)."
         )
     )
@@ -574,7 +574,7 @@ def build_story():
                 "process is silent — close the app, and next time you open "
                 "it you're on the new version.",
                 "<b>To check your version:</b> Settings &#8594; Apps "
-                "&#8594; Eternalgy Case Hub. The app itself does not show "
+                "&#8594; Eternalgy CRM. The app itself does not show "
                 "a version number on screen.",
             ],
             accent=BLUE,
@@ -647,7 +647,7 @@ def build_story():
                     "Nothing is stored on your PC — all case data lives in "
                     "the shared cloud database, so there is nothing to "
                     "back up and nothing lost if your PC is replaced. To "
-                    "uninstall: Settings → Apps → Eternalgy Case Hub → "
+                    "uninstall: Settings → Apps → Eternalgy CRM → "
                     "Uninstall.</font>"
                 ),
             ]
@@ -667,9 +667,9 @@ def main():
     doc = BaseDocTemplate(
         str(OUT),
         pagesize=A4,
-        title="Eternalgy Case Hub \u2014 Install & Update Guide",
+        title="Eternalgy CRM \u2014 Install & Update Guide",
         author="Eternalgy",
-        subject="Case Hub user guide",
+        subject="CRM user guide",
         leftMargin=MARGIN,
         rightMargin=MARGIN,
         topMargin=MARGIN,

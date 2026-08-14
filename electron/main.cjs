@@ -77,7 +77,7 @@ async function createWindow() {
     width: 1600,
     height: 1000,
     backgroundColor: '#ffffff',
-    title: 'Eternalgy Case Hub',
+    title: 'Eternalgy CRM',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -131,7 +131,7 @@ async function boot() {
   try {
     await createWindow();
   } catch (error) {
-    dialog.showErrorBox('Case Hub failed to start', error instanceof Error ? error.message : String(error));
+    dialog.showErrorBox('CRM failed to start', error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

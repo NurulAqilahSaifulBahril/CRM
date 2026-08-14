@@ -1,4 +1,4 @@
-# Eternalgy Case Hub — User Guide
+# Eternalgy CRM — User Guide
 
 **For Eternalgy admin and case management staff**
 
@@ -6,7 +6,7 @@
 
 ## What this app is
 
-Case Hub replaces manual tracking of solar installation cases — customer
+CRM replaces manual tracking of solar installation cases — customer
 details, package specs, payment progress, SEDA, TNB, installation status,
 O&M, insurance, cancellations, referrals and delivery — all in one place.
 
@@ -32,10 +32,10 @@ You need:
 
 ## Step 1 — Download
 
-Go to the **[Case Hub download page](https://github.com/NurulAqilahSaifulBahril/CRM/releases/latest)**.
+Go to the **[CRM download page](https://github.com/NurulAqilahSaifulBahril/CRM/releases/latest)**.
 
 Scroll down to the **Assets** list and click the file that starts with
-`Case-Hub-Setup` and ends in `.exe`. There will be a version number in the
+`CRM-Setup` and ends in `.exe`. There will be a version number in the
 middle — always take the newest one the page offers.
 
 It will go to your **Downloads** folder unless you choose somewhere else.
@@ -59,7 +59,7 @@ Double-click the file you just downloaded.
 Click **Next** through the screens, tick **Create a desktop shortcut** if
 you would like one, then click **Install**.
 
-When it is done you will have an **Eternalgy Case Hub** shortcut on your
+When it is done you will have an **Eternalgy CRM** shortcut on your
 desktop and in the Start Menu.
 
 ---
@@ -132,7 +132,7 @@ boss-wants-to-see-one-agent's-numbers report.
 
 ## Working with colleagues
 
-Case Hub is shared — the moment you or a colleague saves something,
+CRM is shared — the moment you or a colleague saves something,
 **everyone else sees it immediately**, with no refresh needed. If two of
 you have a case open at once, you are both looking at the same record.
 
@@ -150,7 +150,7 @@ anything.
   database, not on your PC, so an update never touches it.
 - **You never download the installer again.** Steps 1–2 above are one time
   only.
-- **To check your version:** Settings → Apps → Eternalgy Case Hub. The app
+- **To check your version:** Settings → Apps → Eternalgy CRM. The app
   itself does not show a version number on screen.
 
 ---
@@ -162,7 +162,7 @@ anything.
 | Blue "Windows protected your PC" screen | Normal for an internal app | Click **More info** → **Run anyway** |
 | Window is blank for a few seconds | Normal on first launch | Wait 10 seconds. If still blank, close it completely and reopen |
 | **"保存失败 Save failed"** message | The change did **not** save — this is serious | Check your internet connection and try saving again. Do not assume it went through |
-| **"Postgres 同步失败" / "Postgres sync failed"** message | Your change **was** saved in Case Hub. A separate background copy failed to sync | No need to redo anything. Just let Nurul / IT know so it can be checked |
+| **"Postgres 同步失败" / "Postgres sync failed"** message | Your change **was** saved in CRM. A separate background copy failed to sync | No need to redo anything. Just let Nurul / IT know so it can be checked |
 | Login box won't accept your name/password | Your account may not exist yet, or the password changed | Ask whoever manages **员工管理 Staff Accounts** to check |
 | App will not start at all | — | Restart your PC, then try again |
 | Anything else | — | Contact Nurul. Say what you were doing and what you saw |
@@ -193,7 +193,7 @@ update them:
 
 - **Your work is not stored on your PC.** All case data lives in the cloud,
   so there is nothing to back up and nothing lost if your PC is replaced.
-- **To uninstall:** Settings → Apps → Eternalgy Case Hub → Uninstall.
+- **To uninstall:** Settings → Apps → Eternalgy CRM → Uninstall.
 
 ---
 

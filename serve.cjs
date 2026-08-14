@@ -1,4 +1,4 @@
-// Static server for the single-file Case Hub app, plus a thin server-side proxy to Postgres.
+// Static server for the single-file CRM app, plus a thin server-side proxy to Postgres.
 //
 // The Postgres proxy token grants full SQL access to the production database (NUrul_DB — the
 // same DB the main CRM runs on, ~90 tables). It must never reach the browser: this process holds
@@ -185,6 +185,6 @@ if (require.main === module) {
   const PORT = Number(process.argv[3] || process.env.PORT) || 8934;
   startServer({ entry: ENTRY, port: PORT }).then(() => {
     const cfg = currentPgConfig();
-    console.log(`Case Hub running at http://localhost:${PORT}/ (entry: ${ENTRY}, pg proxy: ${cfg.configured ? 'configured' : 'NOT configured'})`);
+    console.log(`CRM running at http://localhost:${PORT}/ (entry: ${ENTRY}, pg proxy: ${cfg.configured ? 'configured' : 'NOT configured'})`);
   });
 }

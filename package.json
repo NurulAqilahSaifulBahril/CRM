@@ -1,6 +1,6 @@
 {
   "name": "eternalgy-case-hub",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "scripts": {
     "desktop": "electron .",
@@ -17,7 +17,7 @@
   "main": "electron/main.cjs",
   "build": {
     "appId": "com.nurulaqilah.casehub",
-    "productName": "Eternalgy Case Hub",
+    "productName": "Eternalgy CRM",
     "asar": false,
     "directories": {
       "output": "C:/tmp/case-hub-release"
@@ -39,7 +39,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "artifactName": "Case-Hub-Setup-${version}.${ext}"
+      "artifactName": "CRM-Setup-${version}.${ext}"
     },
     "publish": {
       "provider": "github",
