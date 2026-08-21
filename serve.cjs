@@ -1,4 +1,8 @@
-// Static server for the single-file CRM app, plus a thin server-side proxy to Postgres.
+// Static server for the single-file CRM app, plus the server-side proxy to Postgres.
+//
+// Postgres (NUrul_DB) is the app's only store — the browser reads and writes through the
+// /api/pg/* routes below. It used to read from Firestore and mirror here; that was removed so the
+// data lives solely in the company's own database.
 //
 // The Postgres proxy token grants full SQL access to the production database (NUrul_DB — the
 // same DB the main CRM runs on, ~90 tables). It must never reach the browser: this process holds
@@ -50,7 +54,10 @@ function currentPgConfig() {
 // Runs one parameterized statement through pg-proxy. Every caller in this file supplies both
 // bucket and id as bind params ($1/$2/...) — never string-concatenated — so request bodies can
 // never be used to inject SQL.
-async function runSql(cfg, sql, params) {
+const RETRY_DELAYS_MS = [300, 900, 2000];
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function runSqlOnce(cfg, sql, params) {
   const res = await fetch(cfg.url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cfg.token}` },
@@ -59,6 +66,22 @@ async function runSql(cfg, sql, params) {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || body.message || `pg-proxy HTTP ${res.status}`);
   return body;
+}
+
+// A failure here is only reported after every retry is spent, so callers can treat a thrown
+// error as genuinely down rather than as a blip.
+async function runSql(cfg, sql, params) {
+  let lastErr;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    try { return await runSqlOnce(cfg, sql, params); }
+    catch (e) {
+      lastErr = e;
+      if (attempt === RETRY_DELAYS_MS.length) break;
+      console.warn(`pg-proxy attempt ${attempt + 1} failed (${e.message}) — retrying`);
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+  throw lastErr;
 }
 
 const BUCKETS = new Set(['cases', 'agentDirectory', 'itemDirectory', 'adminDirectory', 'shipmentBatches', 'docLogs']);
@@ -82,6 +105,32 @@ function sendJson(res, status, obj) {
   const data = JSON.stringify(obj);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(data);
+}
+
+async function handlePgRead(req, res) {
+  const cfg = currentPgConfig();
+  if (!cfg.configured) return sendJson(res, 503, { error: 'PG proxy not configured on server' });
+  let payload = {};
+  try { payload = await readJsonBody(req); } catch (e) { /* no body means "every bucket" */ }
+  const wanted = payload && payload.bucket ? [payload.bucket] : [...BUCKETS];
+  if (wanted.some(b => !BUCKETS.has(b))) return sendJson(res, 400, { error: 'Unknown bucket' });
+  try {
+    const out = await runSql(cfg,
+      `select bucket, data from case_hub_records where bucket = any($1::text[]) order by updated_at`,
+      [wanted]
+    );
+    const grouped = {};
+    wanted.forEach(b => { grouped[b] = []; });
+    (out.rows || []).forEach(row => {
+      // pg returns jsonb as an object already; tolerate a string in case the driver differs.
+      const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+      if (grouped[row.bucket]) grouped[row.bucket].push(data);
+    });
+    sendJson(res, 200, { buckets: grouped });
+  } catch (e) {
+    console.error('pg read failed', e.message);
+    sendJson(res, 502, { error: e.message });
+  }
 }
 
 async function handlePgWrite(req, res) {
@@ -160,6 +209,7 @@ function serveStatic(entry, req, res) {
 function createServer({ entry }) {
   return http.createServer((req, res) => {
     const url = req.url.split('?')[0];
+    if (req.method === 'POST' && url === '/api/pg/read') return handlePgRead(req, res);
     if (req.method === 'POST' && url === '/api/pg/write') return handlePgWrite(req, res);
     if (req.method === 'POST' && url === '/api/pg/delete') return handlePgDelete(req, res);
     serveStatic(entry, req, res);
