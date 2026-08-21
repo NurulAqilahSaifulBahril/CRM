@@ -5,7 +5,9 @@
   "scripts": {
     "desktop": "electron .",
     "dist:win": "node scripts/build-installer.cjs",
-    "pack:win": "node scripts/build-installer.cjs --dir"
+    "pack:win": "node scripts/build-installer.cjs --dir",
+    "publish:win": "node scripts/publish-release.cjs",
+    "publish:win:dry": "node scripts/publish-release.cjs --dry-run"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
