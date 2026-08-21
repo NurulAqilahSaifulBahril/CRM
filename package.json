@@ -1,6 +1,6 @@
 {
   "name": "eternalgy-case-hub",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "scripts": {
     "desktop": "electron .",
