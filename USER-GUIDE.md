@@ -71,26 +71,29 @@ Double-click the desktop shortcut.
 The first time you open it, the window may stay blank for a few seconds
 while it starts up. This is normal and only happens on the first launch.
 
-You should then see the **Dashboard** directly — no login screen, no setup
-box. The app is already connected.
+You are then asked to **sign in**. There is no setup box — the app is
+already connected.
 
 ---
 
-## Signing in to make changes
+## Signing in
 
-You can look around — the Dashboard, case list, and reports — without
-signing in.
+The app opens on a **sign-in page**. Nothing is visible until you sign in —
+not the Dashboard, not the case list, not the reports.
 
-The moment you try to **add or edit a case**, a **Staff Login** box appears
-asking for your name and password. This is not a security wall so much as
-an accountability record: every change is saved against the person who made
-it.
+This is not a security wall so much as an accountability record: every
+change is saved against the person who made it.
 
 - Pick your name from the list and enter your password.
 - If your name is not in the list, someone with access to **员工管理 Staff
   Accounts** needs to add you first.
-- You only need to sign in once per session — it does not ask again until
-  you close and reopen the app.
+- You stay signed in after closing and reopening the app. To sign out, click
+  **登出 Sign out** at the top right.
+- If someone renames or removes your account while you are away, you are
+  signed out the next time the app loads.
+
+The very first time the app is used, when no staff accounts exist yet, the
+page offers to create the first account instead.
 
 ---
 
@@ -163,7 +166,7 @@ anything.
 | Window is blank for a few seconds | Normal on first launch | Wait 10 seconds. If still blank, close it completely and reopen |
 | **"保存失败 Save failed"** message | The change did **not** save — this is serious | Check your internet connection and try saving again. Do not assume it went through |
 | **"Postgres 同步失败" / "Postgres sync failed"** message | Your change **was** saved in CRM. A separate background copy failed to sync | No need to redo anything. Just let Nurul / IT know so it can be checked |
-| Login box won't accept your name/password | Your account may not exist yet, or the password changed | Ask whoever manages **员工管理 Staff Accounts** to check |
+| Sign-in won't accept your name/password | Your account may not exist yet, or the password changed | Ask whoever manages **员工管理 Staff Accounts** to check |
 | App will not start at all | — | Restart your PC, then try again |
 | Anything else | — | Contact Nurul. Say what you were doing and what you saw |
 

@@ -13,6 +13,7 @@ give someone on day one. Only the install/update/troubleshooting material
 is shared between them — keep those parts in step when either changes.
 """
 
+import json
 from pathlib import Path
 
 from reportlab.lib import colors
@@ -38,7 +39,9 @@ from reportlab.platypus import (
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "CRM Desktop app_user_guide.pdf"
 
-VERSION = "1.0.2"
+# Read from package.json rather than pinned here: this handout must never claim a different
+# version from the installer it is handed out with.
+VERSION = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
 DATE_LABEL = "August 2026"
 RELEASES_URL = "https://github.com/NurulAqilahSaifulBahril/CRM/releases/latest"
 
@@ -501,20 +504,20 @@ def build_story():
         para(
             "The first time you open it, the window may stay blank for a "
             "few seconds while it starts up. This is normal and only "
-            "happens on the first launch. You should then see the "
-            "<b>Dashboard</b> directly — no login screen, no setup box. "
-            "The app is already connected."
+            "happens on the first launch. You are then asked to "
+            "<b>sign in</b> — pick your name and enter your password. "
+            "There is no setup box; the app is already connected."
         )
     )
     story.append(
         callout(
-            "Signing in only happens when you make a change",
+            "You sign in once, and stay signed in",
             [
-                "You can look around freely without signing in. The moment "
-                "you try to <b>add or edit a case</b>, a Staff Login box "
-                "appears asking for your name and password — this records "
-                "who made each change. If your name isn't listed, ask "
-                "whoever manages Staff Accounts to add you.",
+                "Signing in is the first thing you do — nothing is visible "
+                "until you do. It records who made each change. You stay "
+                "signed in after closing and reopening the app, until you "
+                "click <b>登出 Sign out</b> at the top right. If your name "
+                "isn't listed, ask whoever manages Staff Accounts to add you.",
             ],
         )
     )
@@ -579,7 +582,7 @@ def build_story():
                     "failed — no need to redo anything, just tell Nurul",
                 ],
                 [
-                    "Login box won't accept your name/password",
+                    "Sign-in won't accept your name/password",
                     "Your account may not exist yet, or the password "
                     "changed. Ask whoever manages Staff Accounts",
                 ],
