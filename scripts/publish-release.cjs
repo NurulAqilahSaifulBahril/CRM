@@ -69,7 +69,9 @@ if (existingTag) {
 
 fs.rmSync(outputDir, { recursive: true, force: true });
 
-const builderArgs = ['--win', 'nsis', '--publish', dryRun ? 'never' : 'always'];
+// Pass only --win: naming a target on the command line overrides the arch list configured in
+// package.json, which silently produced an x64-only build when arm64 was also configured.
+const builderArgs = ['--win', '--publish', dryRun ? 'never' : 'always'];
 const result = spawnSync(
   process.execPath,
   [path.join(rootDir, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js'), ...builderArgs],

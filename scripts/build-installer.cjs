@@ -23,7 +23,9 @@ fs.rmSync(outputDir, { recursive: true, force: true });
 
 // --publish never: this only builds the installer locally. Publishing a GitHub Release (so
 // electron-updater has a feed to check) is a separate step done with `gh release create`.
-const builderArgs = ['--win', 'nsis', '--publish', 'never'];
+// Pass only --win: naming a target on the command line overrides the arch list configured in
+// package.json, which silently produced an x64-only build when arm64 was also configured.
+const builderArgs = ['--win', '--publish', 'never'];
 if (packOnly) builderArgs.push('--dir');
 
 run(process.execPath, [path.join(rootDir, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js'), ...builderArgs]);
