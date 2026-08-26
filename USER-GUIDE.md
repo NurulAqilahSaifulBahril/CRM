@@ -34,9 +34,16 @@ You need:
 
 Go to the **[CRM download page](https://github.com/NurulAqilahSaifulBahril/CRM/releases/latest)**.
 
-Scroll down to the **Assets** list and click the file that starts with
-`CRM-Setup` and ends in `.exe`. There will be a version number in the
-middle — always take the newest one the page offers.
+Scroll down to the **Assets** list. There are three installers:
+
+| File | Who it is for |
+|---|---|
+| `CRM-Setup-<version>-x64.exe` | **Almost everyone** — any normal Windows PC |
+| `CRM-Setup-<version>-arm64.exe` | ARM laptops only (Surface Pro X, Snapdragon) |
+| `CRM-Setup-<version>.exe` | Works on either, but twice the download |
+
+Take the **x64** one unless you know you have an ARM machine. Always take the
+newest version the page offers.
 
 It will go to your **Downloads** folder unless you choose somewhere else.
 

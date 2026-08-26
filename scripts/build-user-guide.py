@@ -461,9 +461,11 @@ def build_story():
         steps(
             [
                 "Scroll down to the <b>Assets</b> list.",
-                f"Click the file starting {code('CRM-Setup')} and "
-                "ending in <b>.exe</b> to download it. Always take the "
-                "newest version the page offers.",
+                f"Click {code('CRM-Setup-x64.exe')} — that is the one for a normal "
+                "Windows PC. Only take the <b>arm64</b> file if you know your laptop "
+                "has an ARM processor (Surface Pro X, or a Snapdragon machine). The "
+                "plain file without x64 or arm64 works on either, but is twice the "
+                "size. Always take the newest version the page offers.",
                 "It will go to your <b>Downloads</b> folder unless you "
                 "choose somewhere else.",
             ]
