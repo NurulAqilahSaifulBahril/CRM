@@ -33,7 +33,13 @@
     ],
     "win": {
       "target": [
-        "nsis"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -41,7 +47,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "artifactName": "CRM-Setup-${version}.${ext}"
+      "artifactName": "CRM-Setup-${version}-${arch}.${ext}"
     },
     "publish": {
       "provider": "github",
