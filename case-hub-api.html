@@ -94,7 +94,27 @@ const CASE_TYPES = ["New Installation", "Top Up", "Change SP"];
 const CASE_TYPE_LABELS = { "New Installation": "新装 New Installation", "Top Up": "加装 Top Up", "Change SP": "换服务商 Change SP" };
 const CASE_TYPE_COLORS = { "New Installation": "#0B2A4A", "Top Up": "#0E7C7B", "Change SP": "#C2410C" };
 // Top Up skips the SEDA/TNB departments entirely — everything else stays.
-function skipsSedaTnb(c) { return c.pkg.caseType === "Top Up"; }
+// SEDA/TNB only apply to grid-tied solar work. EV Charger and Other packages never touch them,
+// and a Top Up runs on a system that's already registered.
+function skipsSedaTnb(c) {
+ return c.pkg.packageType !== "Solar Package" || c.pkg.caseType === "Top Up";
+}
+// EV work splits three ways and each behaves differently downstream:
+//   Combo Set        = we supply the unit AND install it (goods + crew)
+//   Wallbox Only     = we sell the unit, customer arranges their own installer (goods, no crew)
+//   Installation Only = customer already has the unit, we only wire it up (crew, no goods)
+const EV_JOB_TYPES = ["Combo Set", "Wallbox Only", "Installation Only"];
+const EV_JOB_LABELS = {
+ "Combo Set": "整套 Combo Set",
+ "Wallbox Only": "只卖充电器 Wallbox Only",
+ "Installation Only": "只做安装 Installation Only",
+};
+const EV_JOB_COLORS = { "Combo Set": "#C2410C", "Wallbox Only": "#6B4E9E", "Installation Only": "#0E7C7B" };
+const isEV = (c) => c.pkg.packageType === "EV Charger Package";
+// Wallbox Only never gets scheduled — there's nothing for a crew to do.
+function needsInstallCrew(c) { return !(isEV(c) && c.pkg.evJobType === "Wallbox Only"); }
+// Installation Only uses the customer's own unit, so it must not draw down our stock.
+function suppliesGoods(c) { return !(isEV(c) && c.pkg.evJobType === "Installation Only"); }
 const PACKAGE_TYPE_COLORS = {
  "Solar Package": "#C89B3C",
  "EV Charger Package": "#3C8C63",
@@ -217,6 +237,7 @@ function emptyCase() {
  pkg: {
  packageType: "Solar Package",
  caseType: "New Installation",
+ evJobType: "Combo Set",
  propertyType: "住家", systemType: "NEM", phaseType: "Single Phase", region: "", district: "",
  panelCount: "", panelSizeW: "", panelModel: "", panelDescription: "",
  inverterModel: "", inverterDescription: "",
@@ -235,7 +256,10 @@ function emptyCase() {
  eppEntries: [],
  sellingPrice: "", note: "",
  },
- payment: { records: [], note: "", isLoanCase: false, loReceivedDate: "", loanBank: "", loanApprovedAmount: "", loanRefNo: "" },
+ payment: { records: [], note: "", isLoanCase: false, loReceivedDate: "", loanBank: "", loanApprovedAmount: "", loanRefNo: "",
+ // Management can green-light an install before the usual 60% is collected. It bypasses a
+ // payment control, so who approved it and why is recorded alongside the flag itself.
+ installOverride: false, overrideApprovedBy: "", overrideDate: "", overrideReason: "" },
  seda: { submitDate: "", approvalDate: "", certificationNo: "", note: "" },
  install: {
  deliveryDate: "",
@@ -293,6 +317,182 @@ function emptyCase() {
  },
  editHistory: [],
  };
+}
+
+/* ---------- interface language ----------
+   Labels in this app are written as one bilingual string — "配套详情 Package Details". Rather than
+   maintaining a parallel dictionary, tr() splits that string at the language boundary and returns
+   the requested half, so a label only ever has to be written once.
+
+   Only the interface is switched. Printed reports, quotations and invoices stay bilingual, because
+   they go to customers who may read either language — not to whoever happens to be signed in.
+
+   Stored values are never translated. "住家" is what sits in the database; English mode shows
+   "Residential" through the .en fields already on PROPERTY_TYPES / ISSUE_TYPE_EN, while the value
+   written back stays Chinese. Translating those would strand every existing case. */
+const LANG_KEY = "casehub.lang";
+const LANGS = ["en", "zh", "both"];
+const LANG_LABELS = { en: "EN", zh: "中文", both: "双语" };
+
+// Read by tr() during render. App assigns it before returning, so every child sees the current
+// value without threading a context through several hundred components.
+let CURRENT_LANG = "en";
+
+const _CJK = /[一-鿿]/;
+const _splitCache = new Map();
+
+// Labels whose two languages cannot be separated by rule — usually because the English word was
+// never written ("Agent 管理" carries no "Directory"), or because both languages share the whole
+// string. Listed explicitly rather than left half-translated.
+const LABEL_OVERRIDES = {
+  "Admin 总部": { zh: "总部", en: "Admin" },
+  "Agent 管理": { zh: "Agent 管理", en: "Agent Directory" },
+  "Agent 视角（模拟链接）": { zh: "Agent 视角（模拟链接）", en: "Agent View (simulated link)" },
+  "Agent 全部 Case 名单 Agent Full Case List": { zh: "Agent 全部 Case 名单", en: "Agent Full Case List" },
+  "Agent 姓名 Name": { zh: "Agent 姓名", en: "Agent Name" },
+  "Inverter 型号 Model": { zh: "Inverter 型号", en: "Inverter Model" },
+  "60%以上付款 60%+ Paid": { zh: "60%以上付款", en: "60%+ Paid" },
+  "板 Size": { zh: "板", en: "Panel Size" },
+  "到 To": { zh: "到", en: "To" },
+  "如 AG001": { zh: "如 AG001", en: "e.g. AG001" },
+  // The English verb was never written into these — splitting leaves a bare noun ("Case").
+  "新增 Case": { zh: "新增 Case", en: "New Case" },
+  "新增 Agent": { zh: "新增 Agent", en: "New Agent" },
+  "删除这个Case": { zh: "删除这个 Case", en: "Delete this Case" },
+  "返回我的 Case": { zh: "返回我的 Case", en: "Back to my Cases" },
+  "负责 Agent": { zh: "负责 Agent", en: "Assigned Agent" },
+  // Chinese and English interleave here, so there is no single boundary to split on.
+  "总Case数 Total Cases": { zh: "总Case数", en: "Total Cases" },
+  "全部cases All Cases": { zh: "全部 cases", en: "All Cases" },
+  "总成交额 Total Value": { zh: "总成交额", en: "Total Value" },
+  "已完成 Case Completed": { zh: "已完成 Case", en: "Completed" },
+  "安装 / O&M / 汇总 Install / O&M / Summary": { zh: "安装 / O&M / 汇总", en: "Install / O&M / Summary" },
+  "定金 / 付款进度 Deposit / Payment Progress": { zh: "定金 / 付款进度", en: "Deposit / Payment Progress" },
+  "取消配套 Cancelled Packages": { zh: "取消配套", en: "Cancelled Packages" },
+  "待收Welcome Letter Pending Welcome Letter": { zh: "待收 Welcome Letter", en: "Pending Welcome Letter" },
+  "待提交SEDA Pending SEDA Submission": { zh: "待提交 SEDA", en: "Pending SEDA Submission" },
+  "待批准SEDA Pending SEDA Approval": { zh: "待批准 SEDA", en: "Pending SEDA Approval" },
+  "待申请TNB Pending TNB Application": { zh: "待申请 TNB", en: "Pending TNB Application" },
+  "等待LO Pending Letter of Offer": { zh: "等待 LO", en: "Pending Letter of Offer" },
+  "文件记录 Document Log（Quotation / Invoice 生成记录）":
+    { zh: "文件记录（Quotation / Invoice 生成记录）", en: "Document Log (Quotation / Invoice history)" },
+  "报告只看 Agent Agent Filter（老板要看单一 Agent 的报告就用这个）":
+    { zh: "报告只看 Agent（老板要看单一 Agent 的报告就用这个）", en: "Agent Filter (report on a single Agent)" },
+  "选好上方日期区间后点按钮，报告会在下方视窗显示，可直接「打印 / 另存为PDF」":
+    { zh: "选好上方日期区间后点按钮，报告会在下方视窗显示，可直接「打印 / 另存为PDF」",
+      en: "Pick a date range above, then choose a report — it opens below, ready to print or save as PDF" },
+  "恒浩能源 · 案件管理系统": { zh: "恒浩能源 · 案件管理系统", en: "Eternalgy · Case Management System" },
+  // Parenthetical hints — the explanation is only written in Chinese.
+  "卖价 Selling Price（自动计算 Auto-computed）":
+    { zh: "卖价（自动计算）", en: "Selling Price (auto-computed)" },
+  "EPP 分期利息 EPP Interest（可以分几次收款，一笔一笔加）":
+    { zh: "EPP 分期利息（可以分几次收款，一笔一笔加）", en: "EPP Interest (add each instalment separately)" },
+  "Battery（有的才填，价钱会加入卖价）":
+    { zh: "Battery（有的才填，价钱会加入卖价）", en: "Battery (only if included — price is added to the selling price)" },
+  "EV Charger（选货物管理里登记好的型号，价钱会加入卖价）":
+    { zh: "EV Charger（选货物管理里登记好的型号，价钱会加入卖价）", en: "EV Charger (pick a model from Items — price is added to the selling price)" },
+  "此内容会用于 Agent 下载的报价单 / 发票 PDF。":
+    { zh: "此内容会用于 Agent 下载的报价单 / 发票 PDF。", en: "Used on the quotation / invoice PDF an Agent downloads." },
+  "⚡ 特批 Special Approval — 未达 60% 也允许排安装":
+    { zh: "⚡ 特批 — 未达 60% 也允许排安装", en: "⚡ Special Approval — allow install queue before 60% paid" },
+  "至": { zh: "至", en: "to" },
+  "EV 充电桩": { zh: "EV 充电桩", en: "EV Charger" },
+  "提货 Pick up (日期+时间)": { zh: "提货（日期+时间）", en: "Pick up (date + time)" },
+  "新增品项": { zh: "新增品项", en: "Add item" },
+  "按定金日期排序，新定金在最上面；建档日期区间可留空表示全部；点击任意一行查看 / 编辑":
+    { zh: "按定金日期排序，新定金在最上面；建档日期区间可留空表示全部；点击任意一行查看 / 编辑",
+      en: "Sorted by deposit date, newest first. Leave the date range empty for all. Click a row to view or edit." },
+  "此 Case 有转介人 Has Referral": { zh: "此 Case 有转介人", en: "Has Referral" },
+  "此 Case 已取消 Package Cancelled": { zh: "此 Case 已取消", en: "Package Cancelled" },
+  "成交 Deals": { zh: "成交", en: "Deals" },
+  "安装完成 Installed": { zh: "安装完成", en: "Installed" },
+  "以首次付款日期归类 By first payment date": { zh: "以首次付款日期归类", en: "By first payment date" },
+};
+
+// Words the Chinese side uses as-is — staff write "所有 Case", not "所有个案" — and acronyms are
+// never translated. Between the Chinese and English text, these belong to the Chinese half.
+const _SHARED_WORDS = new Set([
+  "Case", "Agent", "SEDA", "TNB", "EPP", "DO", "LO", "RM", "EV", "O&M",
+]);
+// Purely numeric or symbolic tokens ("60%+") read the same in both languages and stay on both sides.
+const _isNumeric = (w) => /^[\d%+\-.,/()]+$/.test(w);
+const _isShared = (w) => _SHARED_WORDS.has(w.replace(/[.,:：]$/, ""));
+
+// Most labels are written as one bilingual string — "配套详情 Package Details". This returns the
+// half for the requested language. Anything it cannot split cleanly comes back unchanged, so the
+// worst case is today's bilingual display rather than a mangled or half-empty label.
+function splitBilingual(s) {
+  if (_splitCache.has(s)) return _splitCache.get(s);
+  const str = String(s);
+  if (LABEL_OVERRIDES[str]) { _splitCache.set(s, LABEL_OVERRIDES[str]); return LABEL_OVERRIDES[str]; }
+  let out = { zh: str, en: str };
+
+  if (_CJK.test(str) && /[A-Za-z]/.test(str)) {
+    // Leading emoji and punctuation belong to both halves. Digits stay in the body — they are
+    // often part of the label proper ("60%以上付款").
+    const lead = (str.match(/^[^A-Za-z0-9一-鿿]*/) || [""])[0];
+    const body = str.slice(lead.length);
+    let m;
+
+    if ((m = body.match(/^([\d%+\-.,/()\s]*[一-鿿][^A-Za-z]*?)\s*[·—-]?\s*([A-Za-z][\s\S]*)$/))) {
+      let zh = m[1].trim();
+      const rest = m[2].trim().split(/\s+/);
+      // Shared words and bare numbers move across into the Chinese half; the first word that is
+      // neither begins the English half.
+      const shared = [];
+      while (rest.length > 1 && (_isShared(rest[0]) || _isNumeric(rest[0]))) shared.push(rest.shift());
+      if (shared.length) zh = (zh + " " + shared.join(" ")).trim();
+      const en = shared.filter(_isNumeric).concat(rest).join(" ").trim().replace(/^[/·—-]+\s*/, "");
+      out = { zh: (lead + zh).trim(), en: (lead + en).trim() };
+    } else if ((m = body.match(/^([A-Za-z][A-Za-z0-9 .&/()%'-]*?)\s+([一-鿿][\s\S]*)$/))) {
+      // "SEDA 状态" is a Chinese label built around an acronym, not a translation pair — splitting
+      // it would leave English readers with a bare "SEDA".
+      const head = m[1].trim();
+      if (!/^[A-Z0-9&.]{2,5}$/.test(head) && !_isShared(head)) {
+        out = { zh: (lead + m[2]).trim(), en: (lead + head).trim() };
+      }
+    }
+
+    // Fallback for labels the rules above leave untouched, e.g. "SEDA 申请报告 SEDA Application
+    // Report" — the acronym guard blocks the split, but there is a clean English phrase at the
+    // end. Take the longest all-Latin suffix as English and leave the remainder as Chinese.
+    if (out.en === str && _CJK.test(str)) {
+      const tail = str.match(/[A-Za-z][A-Za-z0-9 .&/()%'+-]*$/);
+      if (tail) {
+        const en = tail[0].trim();
+        const zh = str.slice(0, tail.index).trim();
+        // Only worth it when both halves say something; a two-letter tail is not a translation.
+        if (zh && en.length >= 3 && _CJK.test(zh)) out = { zh, en };
+      }
+    }
+
+    // A half still carrying the other language was never a clean pair, and an empty half is worse
+    // than showing both. Fall back to the original.
+    if (_CJK.test(out.en) || !out.en || !out.zh) out = { zh: str, en: str };
+  }
+
+  _splitCache.set(s, out);
+  return out;
+}
+
+function tr(s) {
+  if (typeof s !== "string" || CURRENT_LANG === "both") return s;
+  if (!_CJK.test(s)) return s;
+  return splitBilingual(s)[CURRENT_LANG] || s;
+}
+
+// Property type and issue type are stored in Chinese — "住家" is the value in the database. These
+// render the label for the chosen language without touching the value itself, so switching the
+// interface can never strand an existing case.
+function propLabel(v) {
+  const p = PROPERTY_TYPES.find(x => x.v === v);
+  if (!p) return v || "-";
+  return CURRENT_LANG === "zh" ? p.v : CURRENT_LANG === "en" ? p.en : `${p.v} ${p.en}`;
+}
+function issueLabel(v) {
+  const en = ISSUE_TYPE_EN[v];
+  if (!en) return v || "-";
+  return CURRENT_LANG === "zh" ? v : CURRENT_LANG === "en" ? en : `${v} ${en}`;
 }
 
 /* ---------- derived calculations ---------- */
@@ -368,13 +568,20 @@ function stageOf(c) {
  }
  if (c.install.deliveryDate || installApplicableItems(c).some(k => c.install[k].date))
  return { label: "安装中", en: "Installing", color: "#C89B3C" };
+ // No SEDA/TNB leg on these, so once a deposit is in they're simply queued for the crew —
+ // saying "New case" would hide that they're already actionable.
+ if (skipsSedaTnb(c)) {
+ if (paymentTotal(c) > 0)
+ return { label: "新案 New Case", en: "Awaiting install", color: "#C89B3C" };
+ return { label: "新案 New Case", en: "Awaiting deposit", color: "#6B7686" };
+ }
  // SEDA mirrors the TNB breakdown above — submitted and approved are different waits, and a
  // case with nothing submitted yet is waiting on us, not on SEDA.
  if (c.seda.approvalDate)
  return { label: "SEDA已批准 · 等安装", en: "Approved, awaiting install", color: "#2E7D6B" };
  if (c.seda.submitDate)
  return { label: "SEDA", en: "Awaiting SEDA approval", color: "#D98C3D" };
- return { label: "New Case", en: skipsSedaTnb(c) ? "New case" : "Pending SEDA application", color: "#6B7686" };
+ return { label: "New Case", en: "Pending SEDA application", color: "#6B7686" };
 }
 
 /* ---------- printable documents (reports / quotation / invoice) ---------- */
@@ -687,10 +894,10 @@ function buildDeliveryOrderDoc(c) {
  if (c.pkg.packageType === "Solar Package" && c.pkg.battery.model) {
  autoItems.push({ name: "Battery (Add-on)", model: c.pkg.battery.model, qty: c.pkg.battery.qty || 1 });
  }
- if (c.pkg.packageType === "EV Charger Package" && c.pkg.evCharger.model) {
+ if (c.pkg.packageType === "EV Charger Package" && c.pkg.evCharger.model && suppliesGoods(c)) {
  autoItems.push({ name: "EV Charger (Add-on)", model: c.pkg.evCharger.model, qty: c.pkg.evCharger.qty || 1 });
  }
- if (c.install.ev.applicable && c.install.ev.model) autoItems.push({ name: "EV Charger (Add-on)", model: c.install.ev.model, qty: c.install.ev.qty || 1 });
+ if (c.install.ev.applicable && c.install.ev.model && suppliesGoods(c)) autoItems.push({ name: "EV Charger (Add-on)", model: c.install.ev.model, qty: c.install.ev.qty || 1 });
  if (c.install.capBank.applicable && c.install.capBank.model) autoItems.push({ name: "Cap Bank (Add-on)", model: c.install.capBank.model, qty: c.install.capBank.qty || 1 });
  // Freeform "Other 其他项目" entries in Package Details (e.g. Ballast System) are billed add-on
  // goods too — they must ship with the order, so they're auto-injected here the same way,
@@ -1329,27 +1536,43 @@ function buildPaymentThresholdReportDoc(thresholdPct, startDate, endDate, cases)
 }
 
 function buildInstallQueueReportDoc(cases) {
- const qualifies = c => paymentPercent(c) >= 60 || (c.payment.isLoanCase && !!c.payment.loReceivedDate);
+ // Solar work waits for 60% because SEDA/TNB approvals sit in between. EV Charger and Other
+ // jobs have no approval stage, so a deposit is enough to schedule the crew.
+ const qualifies = c => c.payment.installOverride
+ || (skipsSedaTnb(c)
+ ? paymentTotal(c) > 0
+ : (paymentPercent(c) >= 60 || (c.payment.isLoanCase && !!c.payment.loReceivedDate)));
  const cancelled = c => c.cancellation && c.cancellation.isCancelled;
 
  // "In progress" = has at least one dated component but still has ticked items with no date.
  // These are already started — they must be finished before new installs, so they go FIRST.
  const inProgress = cases.filter(c =>
- !cancelled(c) &&
+ !cancelled(c) && needsInstallCrew(c) &&
  installApplicableItems(c).some(k => !!c.install[k].date) &&
  installPendingItems(c).length > 0
  );
 
  // Normal queue = qualified (60%+ or LO) but not yet started at all.
  const notStarted = cases.filter(c =>
- !cancelled(c) &&
+ !cancelled(c) && needsInstallCrew(c) &&
  !installApplicableItems(c).some(k => !!c.install[k].date) &&
  qualifies(c)
  );
  const withDate = notStarted.map(c => {
+ // Label the reason each case became schedulable, since the bar differs by package type.
+ const noApproval = skipsSedaTnb(c);
  const via60 = paymentPercent(c) >= 60;
- const crossDate = via60 ? (paymentCrossDateForThreshold(c, 60) || firstPaymentDate(c) || "") : (c.payment.loReceivedDate || "");
- const reason = via60 ? "60%+付款 60%+ Paid" : "贷款LO已收 Loan LO Received";
+ const override = c.payment.installOverride && !via60;
+ const crossDate = override
+ ? (c.payment.overrideDate || firstPaymentDate(c) || "")
+ : (noApproval && !via60
+ ? (firstPaymentDate(c) || "")
+ : (via60 ? (paymentCrossDateForThreshold(c, 60) || firstPaymentDate(c) || "") : (c.payment.loReceivedDate || "")));
+ const reason = via60
+ ? "60%+付款 60%+ Paid"
+ : override
+ ? `⚡ 特批 SPECIAL APPROVAL${c.payment.overrideApprovedBy ? ` — ${c.payment.overrideApprovedBy}` : ""}`
+ : (noApproval ? "已收定金 Deposit Paid" : "贷款LO已收 Loan LO Received");
  return { c, crossDate, reason };
  });
  withDate.sort((a, b) => (a.crossDate || "").localeCompare(b.crossDate || ""));
@@ -1394,6 +1617,27 @@ function buildInstallQueueReportDoc(cases) {
  (c.pkg.inverterEntries || []).forEach(e => { if (e.model) all.push(`${e.model}${e.qty > 1 ? ` x${e.qty}` : ""}`); });
  return all.length ? all.join(", ") : "-";
  };
+ // Battery / EV Charger / Cap Bank are what an EV or Top Up job actually installs — without
+ // these the crew would only see a name and address and not know what to bring.
+ const getEquipmentSpec = (c) => {
+ const all = [];
+ if (isEV(c)) {
+ // Installation Only means the customer already has the unit — the crew needs the phase,
+ // not a model number, so flag it clearly instead of listing equipment we aren't bringing.
+ if (c.pkg.evJobType === "Installation Only") {
+ return `只做安装 INSTALLATION ONLY (${c.pkg.phaseType || "phase not set"}) — 顾客自备充电器 customer supplies unit`;
+ }
+ all.push(`[${c.pkg.evJobType}]`);
+ }
+ const bModel = (c.pkg.battery && c.pkg.battery.model) || c.install.battery.model;
+ const bQty = Number((c.pkg.battery && c.pkg.battery.qty) || c.install.battery.qty) || 1;
+ if (bModel) all.push(`Battery: ${bModel}${bQty > 1 ? ` x${bQty}` : ""}`);
+ const eModel = (c.pkg.evCharger && c.pkg.evCharger.model) || c.install.ev.model;
+ const eQty = Number((c.pkg.evCharger && c.pkg.evCharger.qty) || c.install.ev.qty) || 1;
+ if (eModel) all.push(`EV: ${eModel}${eQty > 1 ? ` x${eQty}` : ""}`);
+ if (c.install.capBank.model) all.push(`Cap Bank: ${c.install.capBank.model}${(Number(c.install.capBank.qty) || 1) > 1 ? ` x${c.install.capBank.qty}` : ""}`);
+ return all.length ? all.join(", ") : "-";
+ };
  // Group by the finer District when Admin has filled it in — a whole state is too broad to
  // schedule a crew around, so JB/PONTIAN/KULAI etc. get their own sub-heading.
  const groupKey = (c) => {
@@ -1415,13 +1659,13 @@ function buildInstallQueueReportDoc(cases) {
  const rows = groups[region].map((x, i) => trHtml([
  i + 1, x.c.customerName || "-", agentDisplay(x.c), x.c.pkg.propertyType,
  `${x.c.pkg.region || "-"}${x.c.pkg.district ? ` - ${x.c.pkg.district}` : ""}`,
- getPanelSpec(x.c), getInverterSpec(x.c),
+ getPanelSpec(x.c), getInverterSpec(x.c), getEquipmentSpec(x.c),
  x.crossDate ? fmtDate(x.crossDate) : "-", `${paymentPercent(x.c)}%`, fmtMoney(x.c.pkg.sellingPrice),
  `⚠️ 待完成 Pending: ${installPendingItems(x.c).join(", ")}`,
  getOtherItems(x.c),
  ], "background:#FBEAEA;")).join("");
  return `<div style="font-weight:bold;font-size:12px;margin-top:10px;color:#6B7686;">${region}</div>
- ${styledTable(["# Queue", "Customer", "Agent", "Property Type", "Region / Area", "Panel", "Inverter", "Qualified Date", "Payment %", "Price", "Pending", "Other"], rows)}`;
+ ${styledTable(["# Queue", "Customer", "Agent", "Property Type", "Region / Area", "Panel", "Inverter", "设备 Equipment", "Qualified Date", "Payment %", "Price", "Pending", "Other"], rows)}`;
  }).join("");
  })()
  : "";
@@ -1443,12 +1687,12 @@ function buildInstallQueueReportDoc(cases) {
  const rows = groups[region].map((x, i) => trHtml([
  i + 1, x.c.customerName || "-", agentDisplay(x.c), x.c.pkg.propertyType,
  `${x.c.pkg.region || "-"}${x.c.pkg.district ? ` - ${x.c.pkg.district}` : ""}`,
- getPanelSpec(x.c), getInverterSpec(x.c),
+ getPanelSpec(x.c), getInverterSpec(x.c), getEquipmentSpec(x.c),
  x.crossDate ? fmtDate(x.crossDate) : "-", `${paymentPercent(x.c)}%`, fmtMoney(x.c.pkg.sellingPrice),
  x.reason, getOtherItems(x.c),
  ])).join("");
  return `<div style="font-weight:bold;font-size:12px;margin-top:10px;color:#6B7686;">${region}</div>
- ${styledTable(["# Queue", "Customer", "Agent", "Property Type", "Region / Area", "Panel", "Inverter", "Qualified Date", "Payment %", "Price", "Reason", "Other"], rows)}`;
+ ${styledTable(["# Queue", "Customer", "Agent", "Property Type", "Region / Area", "Panel", "Inverter", "设备 Equipment", "Qualified Date", "Payment %", "Price", "Reason", "Other"], rows)}`;
  }).join("")
  : "";
 
@@ -1825,7 +2069,7 @@ function computeShippedByModel(cases) {
 
  const evModel = (c.pkg.evCharger && c.pkg.evCharger.model) || c.install.ev.model;
  const evQty = (c.pkg.evCharger && c.pkg.evCharger.qty) || c.install.ev.qty || 1;
- if (c.install.ev.date && evModel) add("EV Charger", evModel, evQty);
+ if (c.install.ev.date && evModel && suppliesGoods(c)) add("EV Charger", evModel, evQty);
 
  if (c.install.capBank.date && c.install.capBank.model) add("Cap Bank", c.install.capBank.model, c.install.capBank.qty || 1);
  });
@@ -1871,7 +2115,7 @@ function caseShipItems(c) {
  const bModel = (c.pkg.battery && c.pkg.battery.model) || c.install.battery.model;
  if (c.install.battery.applicable && bModel) items.push({ key: "battery", label: "Battery", model: bModel, qty: Number((c.pkg.battery && c.pkg.battery.qty) || c.install.battery.qty) || 1 });
  const eModel = (c.pkg.evCharger && c.pkg.evCharger.model) || c.install.ev.model;
- if (c.install.ev.applicable && eModel) items.push({ key: "ev", label: "EV Wallbox", model: eModel, qty: Number((c.pkg.evCharger && c.pkg.evCharger.qty) || c.install.ev.qty) || 1 });
+ if (c.install.ev.applicable && eModel && suppliesGoods(c)) items.push({ key: "ev", label: "EV Wallbox", model: eModel, qty: Number((c.pkg.evCharger && c.pkg.evCharger.qty) || c.install.ev.qty) || 1 });
  if (c.install.capBank.applicable && c.install.capBank.model) items.push({ key: "capBank", label: "Cap Bank", model: c.install.capBank.model, qty: Number(c.install.capBank.qty) || 1 });
  return items;
 }
@@ -2021,7 +2265,7 @@ function SectionCard({ dept, defaultOpen, children, right }) {
  </div>
  <div style={{ flex: 1 }}>
  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 600, fontSize: 14.5, color: "#1B2430" }}>
- {dept.cn} <span style={{ color: "#9AA2AD", fontWeight: 500, fontSize: 12 }}>{dept.label}</span>
+ {CURRENT_LANG !== "en" && dept.cn}{CURRENT_LANG === "both" && " "}{CURRENT_LANG !== "zh" && <span style={{ color: "#9AA2AD", fontWeight: 500, fontSize: 12 }}>{dept.label}</span>}
  </div>
  </div>
  {right}
@@ -2043,11 +2287,11 @@ function AdminNote({ value, onChange, readOnly }) {
  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6, marginBottom: 6 }}>
  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
  <PenLine size={13} color="#B08A2E" />
- <span style={{ fontSize: 11, fontWeight: 700, color: "#B08A2E", letterSpacing: 0.3 }}>ADMIN 备注 Admin Notes</span>
+ <span style={{ fontSize: 11, fontWeight: 700, color: "#B08A2E", letterSpacing: 0.3 }}>{tr("ADMIN 备注 Admin Notes")}</span>
  </div>
  {!readOnly && (
  <button onClick={addEntry} type="button" style={{ ...btnGhost, padding: "4px 10px", fontSize: 11.5, borderColor: "#E3D8B8", color: "#B08A2E" }}>
- <Plus size={12}/> 新增记录 Add Record
+ <Plus size={12}/> {tr("新增记录 Add Record")}
  </button>
  )}
  </div>
@@ -2056,7 +2300,7 @@ function AdminNote({ value, onChange, readOnly }) {
  {value || "暂无备注 No notes"}
  </div>
  ) : (
- <TextArea value={value} onChange={onChange} placeholder="写给Agent看的备注…（可以记录多笔，日期+内容） Notes for Agent (can log multiple entries, date + content)" rows={3} style={{ background: "#fff", minHeight: 70, width: "100%" }} />
+ <TextArea value={value} onChange={onChange} placeholder={tr("写给Agent看的备注…（可以记录多笔，日期+内容） Notes for Agent (can log multiple entries, date + content)")} rows={3} style={{ background: "#fff", minHeight: 70, width: "100%" }} />
  )}
  </div>
  );
@@ -2081,7 +2325,7 @@ function DeptTabBar({ active, onChange, packageType, caseType }) {
  cursor: "pointer", whiteSpace: "nowrap", fontFamily: "'Inter', sans-serif", marginBottom: -3,
  boxShadow: isActive ? "0 2px 6px rgba(0,0,0,0.12)" : "none",
  }}>
- <Icon size={14} /> {d.cn} <span style={{ opacity: 0.85, fontSize: 11.5 }}>{d.label}</span>
+ <Icon size={14} /> {CURRENT_LANG !== "en" && d.cn}{CURRENT_LANG === "both" && " "}{CURRENT_LANG !== "zh" && <span style={{ opacity: 0.85, fontSize: 11.5 }}>{d.label}</span>}
  </button>
  );
  })}
@@ -2338,7 +2582,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 700, color: "#0B2A4A" }}>CASE-</span>
  <input value={c.caseNumber} onChange={e => set("caseNumber", e.target.value.toUpperCase())}
- placeholder="自订编号 Custom No."
+ placeholder={tr("自订编号 Custom No.")}
  style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, fontWeight: 700, color: "#0B2A4A",
  border: c.caseNumber ? "none" : "1px solid #C24141", borderRadius: 6,
  background: c.caseNumber ? "transparent" : "#FBEAEA", outline: "none", flex: 1, minWidth: 80,
@@ -2346,18 +2590,20 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </div>
  </div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 9 }}>
- <Field label="建档日期 Date of Issue">
+ <Field label={tr("建档日期 Date of Issue")}>
  <DateInputDMY value={c.createdAt} onChange={e => set("createdAt", e.target.value)}
  style={{ padding: "5px 7px", fontSize: 12, ...(!c.createdAt ? { borderColor: "#C24141", background: "#FBEAEA" } : {}) }} />
  </Field>
- <Field label="状态 Status">
- <div style={{ paddingTop: 4 }}><Badge color={stage.color}>{stage.label} - {stage.en}</Badge></div>
+ <Field label={tr("状态 Status")}>
+ <div style={{ paddingTop: 4 }}><Badge color={stage.color}>{CURRENT_LANG === "en" ? stage.en : CURRENT_LANG === "zh" ? tr(stage.label) : `${stage.label} - ${stage.en}`}</Badge></div>
  </Field>
- <Field label="配套类型 Package Type">
+ <Field label={tr("配套类型 Package Type")}>
  <div style={{ paddingTop: 4, display: "flex", gap: 6, alignItems: "center" }}>
  <Badge color={PACKAGE_TYPE_COLORS[c.pkg.packageType] || "#0B2A4A"}>{c.pkg.packageType}</Badge>
- {c.pkg.caseType && c.pkg.caseType !== "New Installation" && <Badge color={CASE_TYPE_COLORS[c.pkg.caseType] || "#9AA2AD"}>{CASE_TYPE_LABELS[c.pkg.caseType] || c.pkg.caseType}</Badge>}
- {c.payment.isLoanCase && <Badge color="#2C5F8A">贷款 LOAN</Badge>}
+ {c.pkg.caseType && c.pkg.caseType !== "New Installation" && c.pkg.packageType === "Solar Package" && <Badge color={CASE_TYPE_COLORS[c.pkg.caseType] || "#9AA2AD"}>{tr(CASE_TYPE_LABELS[c.pkg.caseType] || c.pkg.caseType)}</Badge>}
+ {isEV(c) && c.pkg.evJobType && <Badge color={EV_JOB_COLORS[c.pkg.evJobType] || "#9AA2AD"}>{tr(EV_JOB_LABELS[c.pkg.evJobType] || c.pkg.evJobType)}</Badge>}
+ {c.payment.isLoanCase && <Badge color="#2C5F8A">{tr("贷款 LOAN")}</Badge>}
+ {c.payment.installOverride && <Badge color="#C24141">{tr("⚡ 特批 SPECIAL")}</Badge>}
  </div>
  </Field>
  {/* Payment standing at a glance — saves opening the Payment tab just to see if it's settled. */}
@@ -2369,20 +2615,16 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </div>
  </Field>
  </div>
- <Field label="负责 Agent / Internal Assignment">
+ <Field label={tr("负责 Agent / Internal Assignment")}>
  {agentDirectory && agentDirectory.length > 0 ? (
- <select
- value={(agentDirectory.find(a => a.name === c.agentName) || {}).id || ""}
- onChange={e => {
- const ag = agentDirectory.find(a => a.id === e.target.value);
+ <AgentPicker
+ agentDirectory={agentDirectory}
+ agentName={c.agentName}
+ onPick={ag => {
  if (ag) { set("agentName", ag.name); set("agentCode", ag.code); }
  else { set("agentName", ""); set("agentCode", ""); }
  }}
- style={{ ...inputStyle, padding: "5px 7px", fontSize: 12, ...(c.agentName ? {} : { borderColor: "#C24141", background: "#FBEAEA" }) }}
- >
- <option value="">-- Select Agent --</option>
- {agentDirectory.map(a => <option key={a.id} value={a.id}>{a.name}{a.code ? ` (${a.code})` : ""}</option>)}
- </select>
+ />
  ) : (
  <div style={{ fontSize: 12, color: "#B5AE9E" }}>No agents registered yet</div>
  )}
@@ -2409,7 +2651,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <HeaderCard title="CUSTOMER PROFILE">
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 9 }}>
  <Field label="Full Name (SEDA Applicant)">
- <TextInput value={c.customerName} onChange={e => set("customerName", e.target.value)} placeholder="客户姓名（SEDA 申请人）"
+ <TextInput value={c.customerName} onChange={e => set("customerName", e.target.value)} placeholder={tr("客户姓名（SEDA 申请人）")}
  style={{ padding: "5px 7px", fontSize: 12, ...(!c.customerName ? { borderColor: "#C24141", background: "#FBEAEA" } : {}) }} />
  </Field>
  <Field label="TIN Number">
@@ -2438,12 +2680,18 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  {tab === "package" && (
  <>
  <div style={{ background: PACKAGE_TYPE_COLORS[c.pkg.packageType] || "#0B2A4A", borderRadius: 10, padding: "10px 14px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
- <span style={{ color: "#fff", fontWeight: 700, fontSize: 14 }}>{PACKAGE_TYPE_LABELS[c.pkg.packageType] || c.pkg.packageType}</span>
+ <span style={{ color: "#fff", fontWeight: 700, fontSize: 14 }}>{tr(PACKAGE_TYPE_LABELS[c.pkg.packageType] || c.pkg.packageType)}</span>
  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
  {c.pkg.packageType === "Solar Package" && (
  <select value={c.pkg.caseType} onChange={e => set("pkg.caseType", e.target.value)}
  style={{ ...inputStyle, width: 170, background: "#fff", padding: "5px 7px", fontSize: 12 }}>
- {CASE_TYPES.map(t => <option key={t} value={t}>{CASE_TYPE_LABELS[t] || t}</option>)}
+ {CASE_TYPES.map(t => <option key={t} value={t}>{tr(CASE_TYPE_LABELS[t] || t)}</option>)}
+ </select>
+ )}
+ {c.pkg.packageType === "EV Charger Package" && (
+ <select value={c.pkg.evJobType} onChange={e => set("pkg.evJobType", e.target.value)}
+ style={{ ...inputStyle, width: 200, background: "#fff", padding: "5px 7px", fontSize: 12 }}>
+ {EV_JOB_TYPES.map(t => <option key={t} value={t}>{tr(EV_JOB_LABELS[t] || t)}</option>)}
  </select>
  )}
  <select value={c.pkg.packageType} onChange={e => set("pkg.packageType", e.target.value)}
@@ -2452,10 +2700,16 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </select>
  </div>
  </div>
+ {isEV(c) && (
+ <div style={{ background: "#FBF8F0", border: "1px solid #E3D8B8", borderRadius: 8, padding: "7px 12px", fontSize: 11.5, color: "#8A6414" }}>
+ {c.pkg.evJobType === "Combo Set" && <>{tr("整套 Combo Set — 我们供应充电器并负责安装。货品会出现在 DO，安装时扣库存。")}<br />We supply the wallbox and install it. Goods go on the DO and stock is deducted on install.</>}
+ {c.pkg.evJobType === "Wallbox Only" && <>{tr("只卖充电器 Wallbox Only — 我们供货，顾客自行安排安装。货品照常出 DO 并扣库存，但这个 case")} <b>{tr("不会")}</b>{tr("出现在安装排队里。")}<br />We supply the unit, customer arranges their own installer. Stock is deducted, but this case will NOT appear in the Install Queue.</>}
+ {c.pkg.evJobType === "Installation Only" && `只做安装 Installation Only — 顾客自备充电器，我们只做布线（${c.pkg.phaseType || "phase not set"}）。不出 DO，也不扣库存。`}
+ </div>
+ )}
  {c.pkg.packageType === "Solar Package" && c.pkg.caseType === "Top Up" && (
  <div style={{ background: "#FBF8F0", border: "1px solid #E3D8B8", borderRadius: 8, padding: "7px 12px", fontSize: 11.5, color: "#8A6414" }}>
- 加装 Top Up — 在现有系统上加装板 / 逆变器。系统已经注册过，所以 SEDA 和 TNB 分页会隐藏；
- DO 清单和库存追踪照常运作。<br />Adds panels/inverters to an existing system. SEDA and TNB tabs are
+ {tr("加装 Top Up — 在现有系统上加装板 / 逆变器。系统已经注册过，所以 SEDA 和 TNB 分页会隐藏；\n DO 清单和库存追踪照常运作。")}<br />Adds panels/inverters to an existing system. SEDA and TNB tabs are
  hidden since the system is already registered; the DO checklist and stock tracking work as normal.
  </div>
  )}
@@ -2479,21 +2733,21 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
 
  {/* Row 1: Property Type, Phase Type, System Type, Region */}
  <div style={{ display: "grid", gridTemplateColumns: c.pkg.packageType === "Solar Package" ? "repeat(5, 1fr)" : "repeat(4, 1fr)", gap: 12 }}>
- <Field label="物业类型 Property Type">
+ <Field label={tr("物业类型 Property Type")}>
  <Select value={c.pkg.propertyType} onChange={e => set("pkg.propertyType", e.target.value)}
- options={PROPERTY_TYPES.map(p => p.v)} />
+ options={PROPERTY_TYPES.map(p => ({ value: p.v, label: CURRENT_LANG === "zh" ? p.v : CURRENT_LANG === "en" ? p.en : `${p.v} ${p.en}` }))} />
  </Field>
- <Field label="相位 Phase Type">
+ <Field label={tr("相位 Phase Type")}>
  <Select value={c.pkg.phaseType} onChange={e => set("pkg.phaseType", e.target.value)} options={PHASE_TYPES} />
  </Field>
  {c.pkg.packageType === "Solar Package" && (
- <Field label="类型 System Type">
+ <Field label={tr("类型 System Type")}>
  <Select value={c.pkg.systemType} onChange={e => set("pkg.systemType", e.target.value)} options={SYSTEM_TYPES} />
  </Field>
  )}
  <Field label="Region (State)">
  <Select value={c.pkg.region} onChange={e => set("pkg.region", e.target.value)}
- options={[{ value: "", label: "未选择 Not Set" }, ...MALAYSIA_STATES]} />
+ options={[{ value: "", label: tr("未选择 Not Set") }, ...MALAYSIA_STATES]} />
  </Field>
  <Field label="District / Area">
  <TextInput value={c.pkg.district} onChange={e => set("pkg.district", e.target.value)} placeholder="e.g. JB, PONTIAN, KULAI" />
@@ -2508,7 +2762,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  onModelChange={v => set("pkg.panelModel", v)} onDescriptionChange={v => set("pkg.panelDescription", v)}
  onWattChange={v => set("pkg.panelSizeW", v)} />
  </Field>
- <Field label="板数量 Panel Count">
+ <Field label={tr("板数量 Panel Count")}>
  <NumberInput value={c.pkg.panelCount} onChange={e => set("pkg.panelCount", e.target.value)} placeholder="0" />
  {c.pkg.panelSizeW && (
  <div style={{ fontSize: 11.5, color: "#6B7686", marginTop: 4 }}>
@@ -2516,7 +2770,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </div>
  )}
  </Field>
- <Field label="Inverter 型号 Model">
+ <Field label={tr("Inverter 型号 Model")}>
  <ItemPicker category="Inverter" itemDirectory={itemDirectory} model={c.pkg.inverterModel}
  onModelChange={v => set("pkg.inverterModel", v)} onDescriptionChange={v => set("pkg.inverterDescription", v)} />
  </Field>
@@ -2534,7 +2788,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  onModelChange={v => updateInverterEntry(e.id, "model", v)}
  onDescriptionChange={v => updateInverterEntry(e.id, "description", v)} />
  </Field>
- <Field label="数量 Qty">
+ <Field label={tr("数量 Qty")}>
  <NumberInput value={e.qty} onChange={ev => updateInverterEntry(e.id, "qty", ev.target.value)} placeholder="1" />
  </Field>
  <button onClick={() => removeInverterEntry(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141", paddingBottom: 8 }}>
@@ -2556,7 +2810,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </Field>
  ) : <div />}
  <div style={{ background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 8, padding: "8px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
- <span style={{ fontSize: 12.5, color: "#2C5F8A", fontWeight: 600 }}>卖价 Selling Price（自动计算 Auto-computed）</span>
+ <span style={{ fontSize: 12.5, color: "#2C5F8A", fontWeight: 600 }}>{tr("卖价 Selling Price（自动计算 Auto-computed）")}</span>
  <span style={{ fontSize: 18, fontWeight: 700, fontFamily: "'IBM Plex Mono', monospace", color: "#0B2A4A" }}>{fmtMoney(price)}</span>
  </div>
  </div>
@@ -2564,26 +2818,26 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  {c.pkg.packageType !== "Other Package" && (
  <>
  <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>
- {c.pkg.packageType === "EV Charger Package" ? "EV Charger（选货物管理里登记好的型号，价钱会加入卖价）" : "Battery（有的才填，价钱会加入卖价）"}
+ {tr(c.pkg.packageType === "EV Charger Package" ? "EV Charger（选货物管理里登记好的型号，价钱会加入卖价）" : "Battery（有的才填，价钱会加入卖价）")}
  </div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
  {c.pkg.packageType === "EV Charger Package" ? (
  <>
- <Field label="EV Charger 型号">
+ <Field label={tr("EV Charger 型号")}>
  <ItemPicker category="EV Charger" itemDirectory={itemDirectory} model={c.pkg.evCharger.model}
  onModelChange={v => set("pkg.evCharger.model", v)} onDescriptionChange={v => set("pkg.evCharger.description", v)} />
  </Field>
- <Field label="价钱 (RM)"><NumberInput value={c.pkg.evCharger.price} onChange={e => set("pkg.evCharger.price", e.target.value)} placeholder="0" /></Field>
- <Field label="数量 Qty"><NumberInput value={c.pkg.evCharger.qty} onChange={e => set("pkg.evCharger.qty", e.target.value)} placeholder="0" /></Field>
+ <Field label={tr("价钱 (RM)")}><NumberInput value={c.pkg.evCharger.price} onChange={e => set("pkg.evCharger.price", e.target.value)} placeholder="0" /></Field>
+ <Field label={tr("数量 Qty")}><NumberInput value={c.pkg.evCharger.qty} onChange={e => set("pkg.evCharger.qty", e.target.value)} placeholder="0" /></Field>
  </>
  ) : (
  <>
- <Field label="Battery 型号">
+ <Field label={tr("Battery 型号")}>
  <ItemPicker category="Battery" itemDirectory={itemDirectory} model={c.pkg.battery.model}
  onModelChange={v => set("pkg.battery.model", v)} onDescriptionChange={v => set("pkg.battery.description", v)} />
  </Field>
- <Field label="价钱 (RM)"><NumberInput value={c.pkg.battery.price} onChange={e => set("pkg.battery.price", e.target.value)} placeholder="0" /></Field>
- <Field label="数量 Qty"><NumberInput value={c.pkg.battery.qty} onChange={e => set("pkg.battery.qty", e.target.value)} placeholder="0" /></Field>
+ <Field label={tr("价钱 (RM)")}><NumberInput value={c.pkg.battery.price} onChange={e => set("pkg.battery.price", e.target.value)} placeholder="0" /></Field>
+ <Field label={tr("数量 Qty")}><NumberInput value={c.pkg.battery.qty} onChange={e => set("pkg.battery.qty", e.target.value)} placeholder="0" /></Field>
  </>
  )}
  </div>
@@ -2636,20 +2890,20 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  )}
  </div>
 
- <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>价钱 Pricing</div>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>{tr("价钱 Pricing")}</div>
 
  <div style={{ background: "#FBF8F0", border: "1px dashed #E3D8B8", borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
- <span style={{ fontSize: 13, fontWeight: 700, color: "#B08A2E" }}>EPP 分期利息 EPP Interest（可以分几次收款，一笔一笔加）</span>
+ <span style={{ fontSize: 13, fontWeight: 700, color: "#B08A2E" }}>{tr("EPP 分期利息 EPP Interest（可以分几次收款，一笔一笔加）")}</span>
  
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 7 }}>
  {/* Total Received comes first because that's the figure Admin has in hand from the bank
  statement — bank/months/rate are looked up after, so keying flows left to right. */}
- <Field label="这次实收总额 Total Received (RM)">
+ <Field label={tr("这次实收总额 Total Received (RM)")}>
  <NumberInput value={eppInput.totalAmount} onChange={e => setEppInput(prev => ({ ...prev, totalAmount: e.target.value }))}
- placeholder="含利息的总额"
+ placeholder={tr("含利息的总额")}
  style={{ padding: "5px 7px", fontSize: 12, background: "#FFF6DA", borderColor: "#C89B3C", fontWeight: 700, color: "#8A6414" }} />
  </Field>
- <Field label="银行 Bank">
+ <Field label={tr("银行 Bank")}>
  <Select value={eppInput.bank} onChange={e => {
  const bank = e.target.value;
  const months = Number(eppInput.months);
@@ -2657,20 +2911,20 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  setEppInput(prev => ({ ...prev, bank, ratePct: preset ? String(preset) : prev.ratePct }));
  }} options={["", ...EPP_BANKS]} />
  </Field>
- <Field label="分期 Months">
+ <Field label={tr("分期 Months")}>
  <Select value={eppInput.months} onChange={e => {
  const months = e.target.value;
  const preset = EPP_RATE_TABLE[eppInput.bank] && EPP_RATE_TABLE[eppInput.bank][Number(months)];
  setEppInput(prev => ({ ...prev, months, ratePct: preset ? String(preset) : prev.ratePct }));
  }} options={["", ...EPP_MONTHS.map(String)]} />
  </Field>
- <Field label="利率 Rate (%)">
+ <Field label={tr("利率 Rate (%)")}>
  <NumberInput value={eppInput.ratePct} onChange={e => setEppInput(prev => ({ ...prev, ratePct: e.target.value }))} placeholder="Manual entry if no preset" style={{ padding: "5px 7px", fontSize: 12 }} />
  </Field>
  </div>
  {eppPreview && (
  <div style={{ fontSize: 12.5, color: "#6B7686" }}>
- 本金 Principal: <b>{fmtMoney2(eppPreview.principal)}</b> &nbsp;+&nbsp; 利息 Interest: <b style={{ color: "#B08A2E" }}>{fmtMoney2(eppPreview.interest)}</b> &nbsp;=&nbsp; {fmtMoney2(eppInput.totalAmount)}
+ {tr("本金 Principal:")} <b>{fmtMoney2(eppPreview.principal)}</b> {tr("&nbsp;+&nbsp; 利息 Interest:")} <b style={{ color: "#B08A2E" }}>{fmtMoney2(eppPreview.interest)}</b> &nbsp;=&nbsp; {fmtMoney2(eppInput.totalAmount)}
  </div>
  )}
  <button onClick={addEppEntry} disabled={!eppPreview} style={{ ...btnPrimary, alignSelf: "flex-start", padding: "5px 10px", fontSize: 11.5, opacity: eppPreview ? 1 : 0.45 }}>
@@ -2683,16 +2937,16 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, background: "#fff", borderRadius: 6, padding: "5px 9px" }}>
  <span>#{i + 1} {e.bank} {e.months}个月 @ {e.ratePct}% — 本金 {fmtMoney2(e.principal)} + 利息 <b style={{ color: "#B08A2E" }}>{fmtMoney2(e.interest)}</b></span>
  <button onClick={() => removeEppEntry(e.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141" }}>
- <Trash2 size={13}/> 删除这个批次
+ <Trash2 size={13}/> {tr("删除这个批次")}
  </button>
  </div>
  ))}
- <div style={{ fontSize: 12, color: "#6B7686" }}>EPP 利息总额 Total EPP Interest：<b>{fmtMoney2(c.pkg.eppEntries.reduce((s, e) => s + (Number(e.interest) || 0), 0))}</b></div>
+ <div style={{ fontSize: 12, color: "#6B7686" }}>{tr("EPP 利息总额 Total EPP Interest：")}<b>{fmtMoney2(c.pkg.eppEntries.reduce((s, e) => s + (Number(e.interest) || 0), 0))}</b></div>
  </div>
  )}
  </div>
  <div style={{ background: "#FBF0F0", border: "1px dashed #E8C6C6", borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
- <span style={{ fontSize: 13, fontWeight: 700, color: "#C24141" }}>Discount 折扣（回扣内容不一样时，一条一条加，方便呈现给顾客看）</span>
+ <span style={{ fontSize: 13, fontWeight: 700, color: "#C24141" }}>{tr("Discount 折扣（回扣内容不一样时，一条一条加，方便呈现给顾客看）")}</span>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 150px auto", gap: 7 }}>
  <TextInput value={discountInput.description} onChange={e => setDiscountInput(prev => ({ ...prev, description: e.target.value }))} placeholder="Discount reason, e.g. FOC Extra Cable" style={{ padding: "5px 7px", fontSize: 12 }} />
  <NumberInput value={discountInput.amount} onChange={e => setDiscountInput(prev => ({ ...prev, amount: e.target.value }))} placeholder="Amount (RM)" style={{ padding: "5px 7px", fontSize: 12 }} />
@@ -2711,12 +2965,12 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </span>
  </div>
  ))}
- <div style={{ fontSize: 12, color: "#6B7686" }}>折扣总额 Total Discount：<b style={{ color: "#C24141" }}>-{fmtMoney(c.pkg.discountEntries.reduce((s,e)=>s+(Number(e.amount)||0),0))}</b></div>
+ <div style={{ fontSize: 12, color: "#6B7686" }}>{tr("折扣总额 Total Discount：")}<b style={{ color: "#C24141" }}>-{fmtMoney(c.pkg.discountEntries.reduce((s,e)=>s+(Number(e.amount)||0),0))}</b></div>
  </div>
  )}
  </div>
 
- <Field label="备注 Note">
+ <Field label={tr("备注 Note")}>
  <TextArea value={c.pkg.note} onChange={e => set("pkg.note", e.target.value)} placeholder="Other package details" />
  </Field>
 
@@ -2756,7 +3010,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </tbody>
  </table>
  </div>
- <div style={{ fontSize: 11, color: "#B5AE9E", marginTop: 6 }}>此内容会用于 Agent 下载的报价单 / 发票 PDF。</div>
+ <div style={{ fontSize: 11, color: "#B5AE9E", marginTop: 6 }}>{tr("此内容会用于 Agent 下载的报价单 / 发票 PDF。")}</div>
  </div>
  <AdminNote value={c.pkg.note2 || ""} onChange={e => set("pkg.note2", e.target.value)} />
  </>
@@ -2765,9 +3019,9 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  {tab === "payment" && (
  <>
  <div style={{ display: "flex", gap: 16, fontSize: 13, fontFamily: "'IBM Plex Mono', monospace" }}>
- <span>卖价 Price: <b>{fmtMoney(price)}</b></span>
- <span style={{ color: "#3C8C63" }}>已收 Collected: <b>{fmtMoney(total)}</b></span>
- <span style={{ color: balance > 0 ? "#C24141" : "#3C8C63" }}>尚欠 Balance: <b>{fmtMoney(balance)}</b></span>
+ <span>{tr("卖价 Price:")} <b>{fmtMoney(price)}</b></span>
+ <span style={{ color: "#3C8C63" }}>{tr("已收 Collected:")} <b>{fmtMoney(total)}</b></span>
+ <span style={{ color: balance > 0 ? "#C24141" : "#3C8C63" }}>{tr("尚欠 Balance:")} <b>{fmtMoney(balance)}</b></span>
  </div>
 
  <div style={{ background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2778,19 +3032,52 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  {c.payment.isLoanCase && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
- <Field label="贷款银行 Loan Bank">
+ <Field label={tr("贷款银行 Loan Bank")}>
  <TextInput value={c.payment.loanBank} onChange={e => set("payment.loanBank", e.target.value)} placeholder="Maybank / CIMB..." />
  </Field>
- <Field label="批准数额 Approved Amount">
+ <Field label={tr("批准数额 Approved Amount")}>
  <NumberInput value={c.payment.loanApprovedAmount} onChange={e => set("payment.loanApprovedAmount", e.target.value)} placeholder="RM" />
  </Field>
- <Field label="银行 Ref Number">
- <TextInput value={c.payment.loanRefNo} onChange={e => set("payment.loanRefNo", e.target.value)} placeholder="银行的参考编号" />
+ <Field label={tr("银行 Ref Number")}>
+ <TextInput value={c.payment.loanRefNo} onChange={e => set("payment.loanRefNo", e.target.value)} placeholder={tr("银行的参考编号")} />
  </Field>
  </div>
- <Field label="LO (Letter of Offer) 收到日期 — 收到才安排安装日期">
+ <Field label={tr("LO (Letter of Offer) 收到日期 — 收到才安排安装日期")}>
  <DateInputDMY value={c.payment.loReceivedDate} onChange={e => set("payment.loReceivedDate", e.target.value)} style={{ maxWidth: 220 }} />
  </Field>
+ </>
+ )}
+ </div>
+
+ {/* Lets a case join the Install Queue before the usual 60%. Because it overrides a payment
+ control, the approver and reason are captured here so the decision is traceable later. */}
+ <div style={{ background: c.payment.installOverride ? "#FBEAEA" : "#FBFAF6",
+ border: `1px solid ${c.payment.installOverride ? "#E3A9A9" : "#F0ECE1"}`,
+ borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+ <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 600,
+ color: c.payment.installOverride ? "#8B3A3A" : "#6B7686", cursor: "pointer" }}>
+ <input type="checkbox" checked={c.payment.installOverride} onChange={e => set("payment.installOverride", e.target.checked)} />
+ {tr("⚡ 特批 Special Approval — 未达 60% 也允许排安装")}
+ </label>
+ {c.payment.installOverride && (
+ <>
+ <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+ <Field label={tr("批准人 Approved By")}>
+ <TextInput value={c.payment.overrideApprovedBy} onChange={e => set("payment.overrideApprovedBy", e.target.value)}
+ placeholder={tr("姓名 Name")}
+ style={{ ...(!c.payment.overrideApprovedBy ? { borderColor: "#C24141", background: "#FBEAEA" } : {}) }} />
+ </Field>
+ <Field label={tr("批准日期 Approval Date")}>
+ <DateInputDMY value={c.payment.overrideDate} onChange={e => set("payment.overrideDate", e.target.value)} />
+ </Field>
+ <Field label={tr("原因 Reason")}>
+ <TextInput value={c.payment.overrideReason} onChange={e => set("payment.overrideReason", e.target.value)} placeholder={tr("为什么提早排队 Why queued early")} />
+ </Field>
+ </div>
+ <div style={{ fontSize: 11, color: "#8B3A3A" }}>
+ 这个 case 会以「特批 SPECIAL APPROVAL」出现在安装排队报告里 — 目前付款进度 {pct}%。
+ <br />Will appear in the Install Queue flagged SPECIAL APPROVAL — currently {pct}% paid.
+ </div>
  </>
  )}
  </div>
@@ -2832,13 +3119,13 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  {tab === "seda" && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
- <Field label="提交日期 Submit Date">
+ <Field label={tr("提交日期 Submit Date")}>
  <DateInputDMY value={c.seda.submitDate} onChange={e => set("seda.submitDate", e.target.value)} />
  </Field>
- <Field label="批准日期 Approval Date">
+ <Field label={tr("批准日期 Approval Date")}>
  <DateInputDMY value={c.seda.approvalDate} onChange={e => set("seda.approvalDate", e.target.value)} />
  </Field>
- <Field label="证书编号 Certification No.">
+ <Field label={tr("证书编号 Certification No.")}>
  <TextInput value={c.seda.certificationNo} onChange={e => set("seda.certificationNo", e.target.value)} placeholder="Certification No." />
  </Field>
  </div>
@@ -2893,7 +3180,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  alignItems: "center", background: on ? "#FBFAF6" : (idx % 2 ? "#FCFCFA" : "transparent"),
  borderRadius: 6, padding: "3px 2px", opacity: on ? 1 : 0.55 }}>
  <input type="checkbox" checked={on} onChange={e => set(`install.${k}.applicable`, e.target.checked)} />
- <span style={{ fontSize: 12, fontWeight: on ? 600 : 400, color: on ? "#1B2430" : "#B5AE9E" }}>{label}</span>
+ <span style={{ fontSize: 12, fontWeight: on ? 600 : 400, color: on ? "#1B2430" : "#B5AE9E" }}>{tr(label)}</span>
  <DateInputDMY disabled={!on} value={c.install[k].date} onChange={e => set(`install.${k}.date`, e.target.value)}
  style={{ padding: "5px 6px", fontSize: 11.5 }} />
  <div style={{ minWidth: 0 }}>
@@ -2932,45 +3219,45 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  ))}
  </div>
  </div>
- <button onClick={addInstallOther} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> 新增其它项目 Add Other Item</button>
+ <button onClick={addInstallOther} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> {tr("新增其它项目 Add Other Item")}</button>
  <AdminNote value={c.install.note} onChange={e => set("install.note", e.target.value)} />
 
  <div style={{ borderTop: "1px solid #F0ECE1", paddingTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
- <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>DELIVERY ORDER 送货单</div>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>{tr("DELIVERY ORDER 送货单")}</div>
 
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
- <Field label="提货 Pick up (日期+时间)">
+ <Field label={tr("提货 Pick up (日期+时间)")}>
  <TextInput value={c.delivery.pickupDateTime} onChange={e => set("delivery.pickupDateTime", e.target.value)} placeholder="30/7/2026 @ 8:30am" />
  </Field>
  <Field label="Delivery Date">
  <DateInputDMY value={c.delivery.deliveryDate} onChange={e => set("delivery.deliveryDate", e.target.value)} />
  </Field>
- <Field label="车牌 Lorry No.">
+ <Field label={tr("车牌 Lorry No.")}>
  <TextInput value={c.delivery.lorryNo} onChange={e => set("delivery.lorryNo", e.target.value)} placeholder="JMG8811" />
  </Field>
- <Field label="送货时间 Time (start)">
+ <Field label={tr("送货时间 Time (start)")}>
  <TextInput value={c.delivery.deliveryTimeStart} onChange={e => set("delivery.deliveryTimeStart", e.target.value)} placeholder="2.00pm" />
  </Field>
- <Field label="送货时间 Time (end)">
+ <Field label={tr("送货时间 Time (end)")}>
  <TextInput value={c.delivery.deliveryTimeEnd} onChange={e => set("delivery.deliveryTimeEnd", e.target.value)} placeholder="2.30pm" />
  </Field>
  <div />
- <Field label="司机姓名 Driver Name">
+ <Field label={tr("司机姓名 Driver Name")}>
  <TextInput value={c.delivery.driverName} onChange={e => set("delivery.driverName", e.target.value)} placeholder="KHAIRUL" />
  </Field>
- <Field label="司机电话 Driver Phone">
+ <Field label={tr("司机电话 Driver Phone")}>
  <TextInput value={c.delivery.driverPhone} onChange={e => set("delivery.driverPhone", e.target.value)} placeholder="011-56590082" />
  </Field>
  <div />
  <Field label="Material Planner">
  <div style={{ display: "grid", gridTemplateColumns: "1fr 118px", gap: 6 }}>
- <TextInput value={c.delivery.materialPlanner} onChange={e => set("delivery.materialPlanner", e.target.value)} placeholder="姓名" />
+ <TextInput value={c.delivery.materialPlanner} onChange={e => set("delivery.materialPlanner", e.target.value)} placeholder={tr("姓名")} />
  <DateInputDMY value={c.delivery.materialPlannerDate} onChange={e => set("delivery.materialPlannerDate", e.target.value)} />
  </div>
  </Field>
  <Field label="Warehouse Manager">
  <div style={{ display: "grid", gridTemplateColumns: "1fr 118px", gap: 6 }}>
- <TextInput value={c.delivery.warehouseManager} onChange={e => set("delivery.warehouseManager", e.target.value)} placeholder="姓名" />
+ <TextInput value={c.delivery.warehouseManager} onChange={e => set("delivery.warehouseManager", e.target.value)} placeholder={tr("姓名")} />
  <DateInputDMY value={c.delivery.warehouseManagerDate} onChange={e => set("delivery.warehouseManagerDate", e.target.value)} />
  </div>
  </Field>
@@ -2980,14 +3267,14 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
  <input type="checkbox" checked={c.delivery.deliveryAddressSame}
  onChange={e => set("delivery.deliveryAddressSame", e.target.checked)} />
- 送货地址与安装地址相同 Delivery address same as installation address
+ {tr("送货地址与安装地址相同 Delivery address same as installation address")}
  </label>
  {!c.delivery.deliveryAddressSame && (
- <Field label="送货地址 Delivery Address">
- <TextArea value={c.delivery.deliveryAddress} onChange={e => set("delivery.deliveryAddress", e.target.value)} placeholder="如与安装地址不同，请填写…" />
+ <Field label={tr("送货地址 Delivery Address")}>
+ <TextArea value={c.delivery.deliveryAddress} onChange={e => set("delivery.deliveryAddress", e.target.value)} placeholder={tr("如与安装地址不同，请填写…")} />
  </Field>
  )}
- <Field label="备注 Remarks">
+ <Field label={tr("备注 Remarks")}>
  <TextInput value={c.delivery.remarks} onChange={e => set("delivery.remarks", e.target.value)} placeholder="**Call before delivery." />
  </Field>
 
@@ -2999,14 +3286,14 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <div key={it.id} style={{ display: "grid", gridTemplateColumns: "20px 1fr 130px 80px auto", gap: 8, alignItems: "center" }}>
  <span style={{ fontSize: 10.5, color: "#B5AE9E" }}>{i + 1}</span>
  <TextInput value={it.name} onChange={e => updateDOItem(it.id, "name", e.target.value)} placeholder="Item Name" />
- <TextInput value={it.model} onChange={e => updateDOItem(it.id, "model", e.target.value)} placeholder="型号/规格" />
- <NumberInput value={it.qty} onChange={e => updateDOItem(it.id, "qty", e.target.value)} placeholder="数量" />
+ <TextInput value={it.model} onChange={e => updateDOItem(it.id, "model", e.target.value)} placeholder={tr("型号/规格")} />
+ <NumberInput value={it.qty} onChange={e => updateDOItem(it.id, "qty", e.target.value)} placeholder={tr("数量")} />
  <button onClick={() => removeDOItem(it.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141" }}>
  <Trash2 size={14} />
  </button>
  </div>
  ))}
- <button onClick={addDOItem} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> 新增品项</button>
+ <button onClick={addDOItem} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> {tr("新增品项")}</button>
  </div>
 
  <button onClick={() => {
@@ -3030,17 +3317,17 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  {tab === "tnb" && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
- <Field label="申请日期 Apply Date">
+ <Field label={tr("申请日期 Apply Date")}>
  <DateInputDMY value={c.tnb.applyDate} onChange={e => set("tnb.applyDate", e.target.value)} />
  </Field>
- <Field label="Welcome Letter 日期">
+ <Field label={tr("Welcome Letter 日期")}>
  <DateInputDMY value={c.tnb.welcomeDate} onChange={e => set("tnb.welcomeDate", e.target.value)} />
  </Field>
  <Field label="TNB Account No.">
  <TextInput value={c.tnb.tnbAccount} onChange={e => set("tnb.tnbAccount", e.target.value)} placeholder="TNB Account No." />
  </Field>
- <Field label="分行 Branch">
- <TextInput value={c.tnb.branch} onChange={e => set("tnb.branch", e.target.value)} placeholder="哪个 TNB 分行" />
+ <Field label={tr("分行 Branch")}>
+ <TextInput value={c.tnb.branch} onChange={e => set("tnb.branch", e.target.value)} placeholder={tr("哪个 TNB 分行")} />
  </Field>
  </div>
  <div style={{ background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 10, padding: "10px 14px" }}>
@@ -3057,18 +3344,18 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  {c.om.records.map((r, i) => (
  <div key={r.id} style={{ border: "1px solid #F0ECE1", borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr auto", gap: 8 }}>
- <Field label="反馈日期 Report Date"><DateInputDMY value={r.reportDate} onChange={e => updateOM(r.id, "reportDate", e.target.value)} /></Field>
- <Field label="问题类型 Issue Type"><Select value={r.issueType} onChange={e => updateOM(r.id, "issueType", e.target.value)} options={ISSUE_TYPE_OPTIONS} /></Field>
- <Field label="安排处理日期 Scheduled Date"><DateInputDMY value={r.scheduledDate} onChange={e => updateOM(r.id, "scheduledDate", e.target.value)} /></Field>
+ <Field label={tr("反馈日期 Report Date")}><DateInputDMY value={r.reportDate} onChange={e => updateOM(r.id, "reportDate", e.target.value)} /></Field>
+ <Field label={tr("问题类型 Issue Type")}><Select value={r.issueType} onChange={e => updateOM(r.id, "issueType", e.target.value)} options={ISSUE_TYPE_OPTIONS} /></Field>
+ <Field label={tr("安排处理日期 Scheduled Date")}><DateInputDMY value={r.scheduledDate} onChange={e => updateOM(r.id, "scheduledDate", e.target.value)} /></Field>
  <button onClick={() => removeOM(r.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141", alignSelf: "end", paddingBottom: 8 }}>
  <Trash2 size={15} />
  </button>
  </div>
- <Field label="问题详情 Issue Detail"><TextInput value={r.issueDetail} onChange={e => updateOM(r.id, "issueDetail", e.target.value)} placeholder="详细描述问题… Describe the issue…" /></Field>
- <Field label="解决日期（完成后填写） Resolved Date (fill in once done)"><DateInputDMY value={r.resolvedDate} onChange={e => updateOM(r.id, "resolvedDate", e.target.value)} style={{ maxWidth: 200 }} /></Field>
+ <Field label={tr("问题详情 Issue Detail")}><TextInput value={r.issueDetail} onChange={e => updateOM(r.id, "issueDetail", e.target.value)} placeholder={tr("详细描述问题… Describe the issue…")} /></Field>
+ <Field label={tr("解决日期（完成后填写） Resolved Date (fill in once done)")}><DateInputDMY value={r.resolvedDate} onChange={e => updateOM(r.id, "resolvedDate", e.target.value)} style={{ maxWidth: 200 }} /></Field>
  </div>
  ))}
- <button onClick={addOM} style={btnGhost}><Plus size={13}/> 新增维修记录 Add O&M Record</button>
+ <button onClick={addOM} style={btnGhost}><Plus size={13}/> {tr("新增维修记录 Add O&M Record")}</button>
  </div>
  <AdminNote value={c.om.note} onChange={e => set("om.note", e.target.value)} />
  </>
@@ -3076,7 +3363,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
 
  {tab === "insurance" && (
  <>
- <Field label="保单号码 Policy No.">
+ <Field label={tr("保单号码 Policy No.")}>
  <TextInput value={c.insurance.policyNo} onChange={e => set("insurance.policyNo", e.target.value)} placeholder="Policy No." style={{ maxWidth: 260 }} />
  </Field>
 
@@ -3086,7 +3373,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
  {c.insurance.periods.map((p) => (
  <div key={p.id} style={{ display: "grid", gridTemplateColumns: "140px 1fr 1fr auto", gap: 8, alignItems: "center" }}>
- <TextInput value={p.yearLabel} onChange={e => updateInsurancePeriod(p.id, "yearLabel", e.target.value)} placeholder="第1年 Year 1" />
+ <TextInput value={p.yearLabel} onChange={e => updateInsurancePeriod(p.id, "yearLabel", e.target.value)} placeholder={tr("第1年 Year 1")} />
  <DateInputDMY value={p.startDate} onChange={e => updateInsurancePeriod(p.id, "startDate", e.target.value)} />
  <DateInputDMY value={p.endDate} onChange={e => updateInsurancePeriod(p.id, "endDate", e.target.value)} />
  <button onClick={() => removeInsurancePeriod(p.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141" }}>
@@ -3094,21 +3381,21 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </button>
  </div>
  ))}
- <button onClick={addInsurancePeriod} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> 新增下一年 Add Next Year</button>
+ <button onClick={addInsurancePeriod} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> {tr("新增下一年 Add Next Year")}</button>
  </div>
 
- <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>理赔记录 Claim Record</div>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>{tr("理赔记录 Claim Record")}</div>
  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
  {c.insurance.claimRecords.map((r) => (
  <div key={r.id} style={{ display: "grid", gridTemplateColumns: "155px 1fr auto", gap: 8, alignItems: "center" }}>
  <DateInputDMY value={r.date} onChange={e => updateClaimRecord(r.id, "date", e.target.value)} />
- <TextInput value={r.description} onChange={e => updateClaimRecord(r.id, "description", e.target.value)} placeholder="理赔详情 Claim description" />
+ <TextInput value={r.description} onChange={e => updateClaimRecord(r.id, "description", e.target.value)} placeholder={tr("理赔详情 Claim description")} />
  <button onClick={() => removeClaimRecord(r.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141" }}>
  <Trash2 size={14} />
  </button>
  </div>
  ))}
- <button onClick={addClaimRecord} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> 新增理赔记录 Add Claim</button>
+ <button onClick={addClaimRecord} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> {tr("新增理赔记录 Add Claim")}</button>
  </div>
 
  <AdminNote value={c.insurance.note} onChange={e => set("insurance.note", e.target.value)} />
@@ -3120,30 +3407,30 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
  <input type="checkbox" checked={c.referral.hasReferral}
  onChange={e => set("referral.hasReferral", e.target.checked)} />
- <span style={{ fontSize: 13.5, fontWeight: 600, color: "#4A6FA5" }}>此 Case 有转介人 Has Referral</span>
+ <span style={{ fontSize: 13.5, fontWeight: 600, color: "#4A6FA5" }}>{tr("此 Case 有转介人 Has Referral")}</span>
  </label>
  {c.referral.hasReferral && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
- <Field label="转介人姓名 Full Name">
+ <Field label={tr("转介人姓名 Full Name")}>
  <TextInput value={c.referral.name} onChange={e => set("referral.name", e.target.value)} placeholder="Filled by referrer via link" />
  </Field>
  <Field label="IC Number">
- <TextInput value={c.referral.ic} onChange={e => set("referral.ic", e.target.value)} placeholder="身份证号码" />
+ <TextInput value={c.referral.ic} onChange={e => set("referral.ic", e.target.value)} placeholder={tr("身份证号码")} />
  </Field>
  <Field label="TIN Number">
- <TextInput value={c.referral.tin} onChange={e => set("referral.tin", e.target.value)} placeholder="TIN号码" />
+ <TextInput value={c.referral.tin} onChange={e => set("referral.tin", e.target.value)} placeholder={tr("TIN号码")} />
  </Field>
  <Field label="Email Address">
  <TextInput value={c.referral.email} onChange={e => set("referral.email", e.target.value)} placeholder="email@example.com" />
  </Field>
- <Field label="登记日期 Date">
+ <Field label={tr("登记日期 Date")}>
  <DateInputDMY value={c.referral.date} onChange={e => set("referral.date", e.target.value)} />
  </Field>
  </div>
 
  <div style={{ background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 10, padding: 12 }}>
- <div style={{ fontSize: 11.5, fontWeight: 700, color: "#2C5F8A", marginBottom: 6 }}>转介人专属链接 Referral Link</div>
+ <div style={{ fontSize: 11.5, fontWeight: 700, color: "#2C5F8A", marginBottom: 6 }}>{tr("转介人专属链接 Referral Link")}</div>
  <div style={{ fontSize: 12, color: "#6B7686", marginBottom: 8 }}>
  ICTINEmail—— case
  </div>
@@ -3152,7 +3439,7 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  style={{ flex: 1, minWidth: 220, padding: "8px 10px", borderRadius: 8, border: "1px solid #CFE2F0",
  fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", background: "#fff" }} />
  <button onClick={copyReferralLink} style={{ ...btnGhost, padding: "8px 12px" }}>
- <Link2 size={13} /> 复制链接
+ <Link2 size={13} /> {tr("复制链接")}
  </button>
  {linkCopied && <span style={{ fontSize: 11.5, color: "#3C8C63" }}>{linkCopied}</span>}
  </div>
@@ -3168,10 +3455,10 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <Field label="Bank Name">
  <TextInput value={c.referral.bankName} onChange={e => set("referral.bankName", e.target.value)} placeholder="Maybank / CIMB..." />
  </Field>
- <Field label="银行账号 Account No.">
- <TextInput value={c.referral.bankAccountNo} onChange={e => set("referral.bankAccountNo", e.target.value)} placeholder="账号" />
+ <Field label={tr("银行账号 Account No.")}>
+ <TextInput value={c.referral.bankAccountNo} onChange={e => set("referral.bankAccountNo", e.target.value)} placeholder={tr("账号")} />
  </Field>
- <Field label="账户持有人 Account Holder">
+ <Field label={tr("账户持有人 Account Holder")}>
  <TextInput value={c.referral.bankAccountHolder} onChange={e => set("referral.bankAccountHolder", e.target.value)} placeholder="Must match referrer" />
  </Field>
  </div>
@@ -3186,15 +3473,15 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
  <input type="checkbox" checked={c.cancellation.isCancelled}
  onChange={e => set("cancellation.isCancelled", e.target.checked)} />
- <span style={{ fontSize: 13.5, fontWeight: 600, color: "#8B3A3A" }}>此 Case 已取消 Package Cancelled</span>
+ <span style={{ fontSize: 13.5, fontWeight: 600, color: "#8B3A3A" }}>{tr("此 Case 已取消 Package Cancelled")}</span>
  </label>
  {c.cancellation.isCancelled && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
- <Field label="取消日期 Cancel Date">
+ <Field label={tr("取消日期 Cancel Date")}>
  <DateInputDMY value={c.cancellation.cancelDate} onChange={e => set("cancellation.cancelDate", e.target.value)} />
  </Field>
- <Field label="配套价钱 Package Price (RM)">
+ <Field label={tr("配套价钱 Package Price (RM)")}>
  <NumberInput value={c.pkg.sellingPrice} disabled style={{ opacity: 0.6 }} />
  </Field>
  </div>
@@ -3203,10 +3490,10 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  Collected
  </div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 12, alignItems: "end" }}>
- <Field label="已收款项 Collected Amount (RM)">
+ <Field label={tr("已收款项 Collected Amount (RM)")}>
  <NumberInput value={c.cancellation.collectedAmount} onChange={e => set("cancellation.collectedAmount", e.target.value)} placeholder="0" />
  </Field>
- <Field label="收款方式 Collected Method">
+ <Field label={tr("收款方式 Collected Method")}>
  <Select value={c.cancellation.collectedMethod} onChange={e => set("cancellation.collectedMethod", e.target.value)} options={["", ...COLLECTED_METHODS]} />
  </Field>
  <button onClick={() => set("cancellation.collectedAmount", String(paymentTotal(c)))} style={{ ...btnGhost, padding: "8px 12px", fontSize: 12 }}>
@@ -3214,30 +3501,30 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </button>
  </div>
 
- <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>退款 Refund</div>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>{tr("退款 Refund")}</div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
- <Field label="退款数额 Refund Amount (RM)">
+ <Field label={tr("退款数额 Refund Amount (RM)")}>
  <NumberInput value={c.cancellation.refundAmount} onChange={e => set("cancellation.refundAmount", e.target.value)} placeholder="0 After bank charges" />
  </Field>
- <Field label="公司退款方式 Refund Method">
+ <Field label={tr("公司退款方式 Refund Method")}>
  <Select value={c.cancellation.refundMethod} onChange={e => set("cancellation.refundMethod", e.target.value)} options={["", ...REFUND_METHODS]} />
  </Field>
- <Field label="公司退款日期 Company Refund Date">
+ <Field label={tr("公司退款日期 Company Refund Date")}>
  <DateInputDMY value={c.cancellation.companyRefundDate} onChange={e => set("cancellation.companyRefundDate", e.target.value)} />
  </Field>
  </div>
- <Field label="退款原因 Refund Reason">
- <TextArea value={c.cancellation.refundReason} onChange={e => set("cancellation.refundReason", e.target.value)} placeholder="客户取消的原因…" />
+ <Field label={tr("退款原因 Refund Reason")}>
+ <TextArea value={c.cancellation.refundReason} onChange={e => set("cancellation.refundReason", e.target.value)} placeholder={tr("客户取消的原因…")} />
  </Field>
  <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}></div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
  <Field label="Bank Name">
  <TextInput value={c.cancellation.bankName} onChange={e => set("cancellation.bankName", e.target.value)} placeholder="Maybank / CIMB..." />
  </Field>
- <Field label="银行账号 Account No.">
- <TextInput value={c.cancellation.bankAccountNo} onChange={e => set("cancellation.bankAccountNo", e.target.value)} placeholder="账号" />
+ <Field label={tr("银行账号 Account No.")}>
+ <TextInput value={c.cancellation.bankAccountNo} onChange={e => set("cancellation.bankAccountNo", e.target.value)} placeholder={tr("账号")} />
  </Field>
- <Field label="账户持有人 Account Holder">
+ <Field label={tr("账户持有人 Account Holder")}>
  <TextInput value={c.cancellation.bankAccountHolder} onChange={e => set("cancellation.bankAccountHolder", e.target.value)} placeholder="Account Name" />
  </Field>
  </div>
@@ -3256,12 +3543,12 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <div>
  {onDelete && (
  <button onClick={onDelete} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}>
- <Trash2 size={13} /> 删除这个Case
+ <Trash2 size={13} /> {tr("删除这个Case")}
  </button>
  )}
  </div>
  <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
- {savedFlash && <span style={{ fontSize: 12.5, color: "#3C8C63", fontWeight: 600 }}>✓ 已保存 Saved</span>}
+ {savedFlash && <span style={{ fontSize: 12.5, color: "#3C8C63", fontWeight: 600 }}>{tr("✓ 已保存 Saved")}</span>}
  <button onClick={onCancel} style={btnGhost}></button>
  <button onClick={() => {
  // These four identify the case everywhere — reports, search, and the printed documents all
@@ -3278,6 +3565,12 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  }
  // A payment with no date is invisible to every date-filtered report (deposit, payment
  // progress, etc.), so block the save rather than let it silently go missing.
+ // An override bypasses the payment rule, so it can't be left anonymous.
+ if (c.payment.installOverride && !c.payment.overrideApprovedBy.trim()) {
+ alert("已勾选「特批 Special Approval」但没有填写批准人。\n\nSpecial Approval is ticked but no approver name is recorded.\n\n请填写「批准人 Approved By」，方便日后追查。");
+ setTab("payment");
+ return;
+ }
  const undated = c.payment.records.filter(r => !r.date && (Number(r.amount) > 0));
  if (undated.length) {
  alert(`${undated.length} payment record(s) have an amount but no date.\n\nPayments without a date will NOT appear in any report. Please fill in the payment date before saving.`);
@@ -3329,14 +3622,16 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  <Info label="Date of Issue" value={c.createdAt ? fmtDate(c.createdAt) : "-"} mono />
  <div>
  <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600, marginBottom: 4 }}>Status</div>
- <Badge color={stage.color}>{stage.label} - {stage.en}</Badge>
+ <Badge color={stage.color}>{CURRENT_LANG === "en" ? stage.en : CURRENT_LANG === "zh" ? tr(stage.label) : `${stage.label} - ${stage.en}`}</Badge>
  </div>
  <div>
  <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600, marginBottom: 4 }}>Package Type</div>
  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
  <Badge color={PACKAGE_TYPE_COLORS[c.pkg.packageType] || "#0B2A4A"}>{c.pkg.packageType}</Badge>
- {c.pkg.caseType && c.pkg.caseType !== "New Installation" && <Badge color={CASE_TYPE_COLORS[c.pkg.caseType] || "#9AA2AD"}>{CASE_TYPE_LABELS[c.pkg.caseType] || c.pkg.caseType}</Badge>}
- {c.payment.isLoanCase && <Badge color="#2C5F8A">贷款 LOAN</Badge>}
+ {c.pkg.caseType && c.pkg.caseType !== "New Installation" && c.pkg.packageType === "Solar Package" && <Badge color={CASE_TYPE_COLORS[c.pkg.caseType] || "#9AA2AD"}>{tr(CASE_TYPE_LABELS[c.pkg.caseType] || c.pkg.caseType)}</Badge>}
+ {isEV(c) && c.pkg.evJobType && <Badge color={EV_JOB_COLORS[c.pkg.evJobType] || "#9AA2AD"}>{tr(EV_JOB_LABELS[c.pkg.evJobType] || c.pkg.evJobType)}</Badge>}
+ {c.payment.isLoanCase && <Badge color="#2C5F8A">{tr("贷款 LOAN")}</Badge>}
+ {c.payment.installOverride && <Badge color="#C24141">{tr("⚡ 特批 SPECIAL")}</Badge>}
  </div>
  </div>
  <div>
@@ -3346,7 +3641,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  </Badge>
  </div>
  </div>
- <div style={{ marginTop: 12 }}><Info label="负责 Agent" value={agentDisplay(c)} /></div>
+ <div style={{ marginTop: 12 }}><Info label={tr("负责 Agent")} value={agentDisplay(c)} /></div>
  </HeaderCard>
  <HeaderCard title="CUSTOMER PROFILE">
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
@@ -3357,7 +3652,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  <Info label="Contact" value={c.customerPhone || "-"} />
  </div>
  {c.billingName && c.billingName.trim() && c.billingName.trim() !== c.customerName.trim() && (
- <div style={{ marginBottom: 12 }}><Info label="开票/文件姓名 Billing Name" value={c.billingName} /></div>
+ <div style={{ marginBottom: 12 }}><Info label={tr("开票/文件姓名 Billing Name")} value={c.billingName} /></div>
  )}
  <Info label="Installation Address" value={c.installAddress || "-"} />
  </HeaderCard>
@@ -3372,14 +3667,14 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  {!isAgentView && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, fontSize: 13.5 }}>
- <Info label="物业类型" value={c.pkg.propertyType} />
- <Info label="相位 Phase" value={c.pkg.phaseType || "-"} />
+ <Info label={tr("物业类型 Property Type")} value={propLabel(c.pkg.propertyType)} />
+ <Info label={tr("相位 Phase")} value={c.pkg.phaseType || "-"} />
  <Info label="Region" value={c.pkg.region ? `${c.pkg.region}${c.pkg.district ? " - " + c.pkg.district : ""}` : "-"} />
  {c.pkg.packageType === "Solar Package" && (
  <>
- <Info label="类型" value={c.pkg.systemType} />
- <Info label="板数量" value={c.pkg.panelCount || "-"} mono />
- <Info label="板 Size" value={c.pkg.panelSizeW ? `${c.pkg.panelSizeW}W` : "-"} mono />
+ <Info label={tr("类型")} value={c.pkg.systemType} />
+ <Info label={tr("板数量")} value={c.pkg.panelCount || "-"} mono />
+ <Info label={tr("板 Size")} value={c.pkg.panelSizeW ? `${c.pkg.panelSizeW}W` : "-"} mono />
  <Info label="Inverter" value={c.pkg.inverterModel || "-"} />
  </>
  )}
@@ -3396,7 +3691,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  )}
  {c.pkg.discountEntries && c.pkg.discountEntries.length > 0 && (
  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
- <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>折扣 Discount</div>
+ <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>{tr("折扣 Discount")}</div>
  {c.pkg.discountEntries.map(e => (
  <div key={e.id} style={{ fontSize: 12.5, color: "#C24141" }}>{e.description || "Discount"}: -{fmtMoney(e.amount)}</div>
  ))}
@@ -3404,7 +3699,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  )}
  {c.pkg.eppEntries && c.pkg.eppEntries.length > 0 && (
  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
- <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>EPP 分期记录</div>
+ <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>{tr("EPP 分期记录")}</div>
  {c.pkg.eppEntries.map((e, i) => (
  <div key={e.id} style={{ fontSize: 12.5, color: "#1B2430" }}>
  #{i + 1} {e.bank} {e.months}个月 @ {e.ratePct}% — 本金 {fmtMoney2(e.principal)} + 利息 {fmtMoney2(e.interest)}
@@ -3412,7 +3707,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  ))}
  </div>
  )}
- <Info label="卖价 Selling Price" value={fmtMoney(price)} mono />
+ <Info label={tr("卖价 Selling Price")} value={fmtMoney(price)} mono />
  {/* pkg.note is internal-only (Admin use), intentionally not shown to Agent */}
  </>
  )}
@@ -3455,12 +3750,12 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  if (logDoc) logDoc({ caseId: c.id, customerName: c.customerName, docType: "Quotation", actor: actorName || "Admin" });
  setPrintDoc(buildQuotationDoc(c));
  }} style={btnGhost}>
- <FileDown size={14} /> 下载报价单 Quotation
+ <FileDown size={14} /> {tr("下载报价单 Quotation")}
  </button>
  </div>
 
  <div style={{ background: "#FBF8F0", border: "1px dashed #E3D8B8", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
- <div style={{ fontSize: 11.5, fontWeight: 700, color: "#B08A2E", letterSpacing: 0.3 }}>生成 PROFORMA INVOICE（跟顾客收款用）</div>
+ <div style={{ fontSize: 11.5, fontWeight: 700, color: "#B08A2E", letterSpacing: 0.3 }}>{tr("生成 PROFORMA INVOICE（跟顾客收款用）")}</div>
  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
  {[5, 75, 20, 100].map(pct => (
  <button key={pct} onClick={() => setInvoiceAmount(String(Math.round(price * pct / 100)))}
@@ -3468,11 +3763,11 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  ))}
  </div>
  <div style={{ display: "grid", gridTemplateColumns: "160px 1fr", gap: 10 }}>
- <Field label="收款金额 Amount (RM)">
- <NumberInput value={invoiceAmount} onChange={e => setInvoiceAmount(e.target.value)} placeholder="手动输入或选择上方 %" />
+ <Field label={tr("收款金额 Amount (RM)")}>
+ <NumberInput value={invoiceAmount} onChange={e => setInvoiceAmount(e.target.value)} placeholder={tr("手动输入或选择上方 %")} />
  </Field>
- <Field label="收款说明 Description">
- <TextInput value={invoiceNote} onChange={e => setInvoiceNote(e.target.value)} placeholder="如：Deposit / SEDA批准后款项 / 尾款" />
+ <Field label={tr("收款说明 Description")}>
+ <TextInput value={invoiceNote} onChange={e => setInvoiceNote(e.target.value)} placeholder={tr("如：Deposit / SEDA批准后款项 / 尾款")} />
  </Field>
  </div>
  <button
@@ -3484,7 +3779,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  disabled={!(Number(invoiceAmount) > 0)}
  style={{ ...btnPrimary, opacity: Number(invoiceAmount) > 0 ? 1 : 0.45, cursor: Number(invoiceAmount) > 0 ? "pointer" : "not-allowed", alignSelf: "flex-start" }}
  >
- <FileDown size={14} /> 生成 Proforma Invoice
+ <FileDown size={14} /> {tr("生成 Proforma Invoice")}
  </button>
  <div style={{ fontSize: 11, color: "#9AA2AD" }}> — Admin </div>
  </div>
@@ -3495,9 +3790,9 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  {tab === "payment" && (
  <>
  <div style={{ display: "flex", gap: 18, fontFamily: "'IBM Plex Mono', monospace", fontSize: 13.5, flexWrap: "wrap" }}>
- <span>卖价 Price: <b>{fmtMoney(price)}</b></span>
- <span style={{ color: "#3C8C63" }}>已收 Collected: <b>{fmtMoney(total)}</b> ({pct}%)</span>
- <span style={{ color: price - total > 0 ? "#C24141" : "#3C8C63" }}>尚欠 Balance: <b>{fmtMoney(price - total)}</b></span>
+ <span>{tr("卖价 Price:")} <b>{fmtMoney(price)}</b></span>
+ <span style={{ color: "#3C8C63" }}>{tr("已收 Collected:")} <b>{fmtMoney(total)}</b> ({pct}%)</span>
+ <span style={{ color: price - total > 0 ? "#C24141" : "#3C8C63" }}>{tr("尚欠 Balance:")} <b>{fmtMoney(price - total)}</b></span>
  </div>
  <div style={{ height: 8, background: "#F0ECE1", borderRadius: 6, overflow: "hidden" }}>
  <div style={{ width: `${pct}%`, height: "100%", background: "linear-gradient(90deg,#0B2A4A,#C89B3C)" }} />
@@ -3507,8 +3802,8 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  <div>贷款 Case Loan Case — {c.payment.loReceivedDate ? `LO 已收到 Received ${fmtDate(c.payment.loReceivedDate)}` : "LO 尚未收到 LO Not Received Yet"}</div>
  {(c.payment.loanBank || c.payment.loanApprovedAmount || c.payment.loanRefNo) && (
  <div style={{ fontSize: 12 }}>
- {c.payment.loanBank && <>贷款银行 Bank: <b>{c.payment.loanBank}</b>　</>}
- {c.payment.loanApprovedAmount && <>批准数额 Approved: <b>{fmtMoney(c.payment.loanApprovedAmount)}</b>　</>}
+ {c.payment.loanBank && <>{tr("贷款银行 Bank:")} <b>{c.payment.loanBank}</b>　</>}
+ {c.payment.loanApprovedAmount && <>{tr("批准数额 Approved:")} <b>{fmtMoney(c.payment.loanApprovedAmount)}</b>　</>}
  {c.payment.loanRefNo && <>Ref No: <b>{c.payment.loanRefNo}</b></>}
  </div>
  )}
@@ -3533,9 +3828,9 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  {tab === "seda" && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
- <Info label="提交日期" value={c.seda.submitDate ? fmtDateFull(c.seda.submitDate) : "未提交 Not Submitted"} mono />
- <Info label="批准日期" value={c.seda.approvalDate ? fmtDateFull(c.seda.approvalDate) : "未批准 Not Approved"} mono />
- <Info label="证书编号 Certification No." value={c.seda.certificationNo || "-"} mono />
+ <Info label={tr("提交日期")} value={c.seda.submitDate ? fmtDateFull(c.seda.submitDate) : "未提交 Not Submitted"} mono />
+ <Info label={tr("批准日期")} value={c.seda.approvalDate ? fmtDateFull(c.seda.approvalDate) : "未批准 Not Approved"} mono />
+ <Info label={tr("证书编号 Certification No.")} value={c.seda.certificationNo || "-"} mono />
  </div>
  <AdminNote value={c.seda.note} readOnly />
  </>
@@ -3560,9 +3855,9 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  <div key={k} style={{ borderBottom: "1px solid #F0ECE1", paddingBottom: 6 }}>
  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
  {c.install[k].date ? <CheckCircle2 size={15} color="#3C8C63" /> : <Circle size={15} color="#C9C2AE" />}
- <span style={{ width: 150 }}>{label}</span>
+ <span style={{ width: 150 }}>{tr(label)}</span>
  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: c.install[k].date ? "#1B2430" : "#B5AE9E" }}>
- {c.install[k].date ? fmtDateFull(c.install[k].date) : "待安排 Pending"}
+ {c.install[k].date ? fmtDateFull(c.install[k].date) : tr("待安排 Pending")}
  </span>
  {(k === "battery" || k === "ev") && c.install[k].model && (
  <span style={{ fontSize: 12, color: "#9AA2AD" }}> - {c.install[k].model} x{c.install[k].qty || 1}</span>
@@ -3580,7 +3875,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  {c.install.otherItems.filter(it => it.applicable).map(it => (
  <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5 }}>
  {it.date ? <CheckCircle2 size={15} color="#3C8C63" /> : <Circle size={15} color="#C9C2AE" />}
- <span style={{ width: 150 }}>{it.name || "其它项目"}</span>
+ <span style={{ width: 150 }}>{it.name || tr("其它项目 Other item")}</span>
  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: it.date ? "#1B2430" : "#B5AE9E" }}>
  {it.date ? fmtDateFull(it.date) : "待安排 Pending"}
  </span>
@@ -3594,10 +3889,10 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  {tab === "tnb" && (
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
- <Info label="申请日期" value={c.tnb.applyDate ? fmtDateFull(c.tnb.applyDate) : "未申请 Not Applied"} mono />
+ <Info label={tr("申请日期")} value={c.tnb.applyDate ? fmtDateFull(c.tnb.applyDate) : "未申请 Not Applied"} mono />
  <Info label="Welcome Letter" value={c.tnb.welcomeDate ? fmtDateFull(c.tnb.welcomeDate) : "未收到 Not Received"} mono />
  <Info label="TNB Account No." value={c.tnb.tnbAccount || "-"} mono />
- <Info label="分行 Branch" value={c.tnb.branch || "-"} />
+ <Info label={tr("分行 Branch")} value={c.tnb.branch || "-"} />
  </div>
  <div style={{ background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 10, padding: "10px 14px" }}>
  <div style={{ fontSize: 11, color: "#2C5F8A", fontWeight: 700 }}>TNB Customer Care Line</div>
@@ -3626,17 +3921,17 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  </div>
  ))}
  </div>
- ) : <Empty text="暂无维修记录 No O&M records" />}
+ ) : <Empty text={tr("暂无维修记录 No O&M records")} />}
  <AdminNote value={c.om.note} readOnly />
  </>
  )}
 
  {tab === "insurance" && (
  <>
- <Info label="保单号码 Policy No." value={c.insurance.policyNo || "-"} mono />
+ <Info label={tr("保单号码 Policy No.")} value={c.insurance.policyNo || "-"} mono />
  {c.insurance.periods.length > 0 ? (
  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
- <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>保险年度 Coverage Periods</div>
+ <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>{tr("保险年度 Coverage Periods")}</div>
  {c.insurance.periods.map(p => (
  <div key={p.id} style={{ fontSize: 13, display: "flex", gap: 10 }}>
  <span style={{ fontWeight: 600, width: 130 }}>{p.yearLabel}</span>
@@ -3649,7 +3944,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  ) : <Empty text="No Insurance Period Set" />}
  {c.insurance.claimRecords.length > 0 && (
  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
- <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>理赔记录 Claim Record</div>
+ <div style={{ fontSize: 11, color: "#9AA2AD", fontWeight: 600 }}>{tr("理赔记录 Claim Record")}</div>
  {c.insurance.claimRecords.map(r => (
  <div key={r.id} style={{ fontSize: 13, display: "flex", gap: 10 }}>
  <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: "#6B7686" }}>{r.date ? fmtDateFull(r.date) : "-"}</span>
@@ -3668,7 +3963,7 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  <>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
  <Info label="Referrer Name" value={c.referral.name || "-"} />
- <Info label="登记日期" value={c.referral.date ? fmtDateFull(c.referral.date) : "-"} mono />
+ <Info label={tr("登记日期")} value={c.referral.date ? fmtDateFull(c.referral.date) : "-"} mono />
  <Info label="IC Number" value={c.referral.ic || "-"} mono />
  <Info label="TIN Number" value={c.referral.tin || "-"} mono />
  <Info label="Email" value={c.referral.email || "-"} />
@@ -3677,13 +3972,13 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  银行资料 {c.referral.bankSubmittedAt ? `· 已提交于 ${fmtDateFull(c.referral.bankSubmittedAt)}` : "· 尚未提交"}
  </div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
- <Info label="银行名称" value={c.referral.bankName || "-"} />
- <Info label="账号" value={c.referral.bankAccountNo || "-"} mono />
- <Info label="账户持有人" value={c.referral.bankAccountHolder || "-"} />
+ <Info label={tr("银行名称")} value={c.referral.bankName || "-"} />
+ <Info label={tr("账号")} value={c.referral.bankAccountNo || "-"} mono />
+ <Info label={tr("账户持有人")} value={c.referral.bankAccountHolder || "-"} />
  </div>
  <AdminNote value={c.referral.note} readOnly />
  </>
- ) : <Empty text="此 Case 没有转介人" />}
+ ) : <Empty text={tr("此 Case 没有转介人")} />}
  </>
  )}
 
@@ -3693,21 +3988,21 @@ function CaseDetailReadOnly({ c, isAgentView, logDoc, actorName }) {
  <>
  <Badge color="#8B3A3A"> Case Cancelled</Badge>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 4 }}>
- <Info label="取消日期" value={c.cancellation.cancelDate ? fmtDateFull(c.cancellation.cancelDate) : "-"} mono />
- <Info label="已收款项" value={`${fmtMoney(c.cancellation.collectedAmount)} ${c.cancellation.collectedMethod ? "· " + c.cancellation.collectedMethod : ""}`} mono />
- <Info label="退款数额" value={fmtMoney(c.cancellation.refundAmount)} mono />
- <Info label="公司退款方式" value={c.cancellation.refundMethod || "-"} />
- <Info label="公司退款日期" value={c.cancellation.companyRefundDate ? fmtDateFull(c.cancellation.companyRefundDate) : "未退款 Not Refunded"} mono />
- <Info label="退款原因" value={c.cancellation.refundReason || "-"} />
+ <Info label={tr("取消日期")} value={c.cancellation.cancelDate ? fmtDateFull(c.cancellation.cancelDate) : "-"} mono />
+ <Info label={tr("已收款项")} value={`${fmtMoney(c.cancellation.collectedAmount)} ${c.cancellation.collectedMethod ? "· " + c.cancellation.collectedMethod : ""}`} mono />
+ <Info label={tr("退款数额")} value={fmtMoney(c.cancellation.refundAmount)} mono />
+ <Info label={tr("公司退款方式")} value={c.cancellation.refundMethod || "-"} />
+ <Info label={tr("公司退款日期")} value={c.cancellation.companyRefundDate ? fmtDateFull(c.cancellation.companyRefundDate) : "未退款 Not Refunded"} mono />
+ <Info label={tr("退款原因")} value={c.cancellation.refundReason || "-"} />
  </div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
- <Info label="顾客银行" value={c.cancellation.bankName || "-"} />
- <Info label="银行账号" value={c.cancellation.bankAccountNo || "-"} mono />
- <Info label="账户持有人" value={c.cancellation.bankAccountHolder || "-"} />
+ <Info label={tr("顾客银行")} value={c.cancellation.bankName || "-"} />
+ <Info label={tr("银行账号")} value={c.cancellation.bankAccountNo || "-"} mono />
+ <Info label={tr("账户持有人")} value={c.cancellation.bankAccountHolder || "-"} />
  </div>
  <AdminNote value={c.cancellation.note} readOnly />
  </>
- ) : <Empty text="此 Case 没有转介人" />}
+ ) : <Empty text={tr("此 Case 没有转介人")} />}
  </>
  )}
  </div>
@@ -3746,7 +4041,7 @@ function CaseCard({ c, onClick }) {
  </span>
  <PType.icon size={14} color="#8A93A0" />
  <span style={{ fontSize: 12, color: "#8A93A0" }}>
- {c.pkg.propertyType}{c.pkg.packageType === "Solar Package" ? ` - ${c.pkg.systemType}` : ""}
+ {propLabel(c.pkg.propertyType)}{c.pkg.packageType === "Solar Package" ? ` - ${c.pkg.systemType}` : ""}
  </span>
  {c.pkg.packageType !== "Solar Package" && (
  <Badge color={PACKAGE_TYPE_COLORS[c.pkg.packageType] || "#9AA2AD"} style={{ fontSize: 10 }}>
@@ -3761,7 +4056,7 @@ function CaseCard({ c, onClick }) {
  <span>{fmtMoney(c.pkg.sellingPrice)}</span>
  </div>
  </div>
- <Badge color={stage.color}>{stage.label} - {stage.en}</Badge>
+ <Badge color={stage.color}>{CURRENT_LANG === "en" ? stage.en : CURRENT_LANG === "zh" ? tr(stage.label) : `${stage.label} - ${stage.en}`}</Badge>
  <ChevronRight size={16} color="#C9C2AE" />
  </button>
  );
@@ -3769,7 +4064,7 @@ function CaseCard({ c, onClick }) {
 
 /* ---------- Dashboard ---------- */
 
-function Dashboard({ cases, itemDirectory, docLogs }) {
+function Dashboard({ cases, itemDirectory, docLogs, agentDirectory }) {
  const today = new Date().toISOString().slice(0, 10);
  const monthStart = today.slice(0, 8) + "01";
  const [rangeStart, setRangeStart] = useState(monthStart);
@@ -3782,7 +4077,11 @@ function Dashboard({ cases, itemDirectory, docLogs }) {
  const byType = (list) => PROPERTY_TYPES.map(p => ({ type: p.v, label: `${p.en}`, icon: p.icon, count: list.filter(c => c.pkg.propertyType === p.v).length }));
 
  const stageCounts = {};
- cases.forEach(c => { const st = stageOf(c); const key = `${st.label} ${st.en}`; stageCounts[key] = (stageCounts[key] || 0) + 1; });
+ cases.forEach(c => { const st = stageOf(c);
+ // st.label is the short bilingual tag, st.en the English description — show whichever suits
+ // the chosen language rather than both glued together.
+ const key = CURRENT_LANG === "both" ? `${st.label} ${st.en}` : (CURRENT_LANG === "zh" ? tr(st.label) : st.en);
+ stageCounts[key] = (stageCounts[key] || 0) + 1; });
 
  const buckets = [
  { label: "0–29%", test: (p) => p < 30, color: "#C24141" },
@@ -3792,10 +4091,17 @@ function Dashboard({ cases, itemDirectory, docLogs }) {
  ].map(b => ({ ...b, count: cases.filter(c => b.test(paymentPercent(c))).length }));
 
  const totalValue = cases.reduce((s, c) => s + (Number(c.pkg.sellingPrice) || 0), 0);
- const completedCases = cases.filter(c => stageOf(c).label === "已完成").length;
+ // stageOf() returns label "Completed" for a finished case, never "已完成" — comparing against
+ // the Chinese made this count permanently zero.
+ const completedCases = cases.filter(c => stageOf(c).en === "Completed").length;
 
  const [reportAgent, setReportAgent] = useState("全部");
- const agentNames = Array.from(new Set(cases.map(c => c.agentName).filter(Boolean))).sort();
+ // Pull from the Agent directory rather than from existing cases — a newly registered agent
+ // has no cases yet, so deriving the list from cases would hide them from this filter.
+ const agentNames = Array.from(new Set([
+ ...(agentDirectory || []).map(a => a.name),
+ ...cases.map(c => c.agentName),
+ ].filter(Boolean))).sort();
  const reportCases = reportAgent === "全部" ? cases : cases.filter(c => c.agentName === reportAgent);
  // Wraps every report so picking a single Agent above also stamps that onto the printed
  // report's title/header — without needing to touch each individual report-builder function.
@@ -3810,81 +4116,81 @@ function Dashboard({ cases, itemDirectory, docLogs }) {
  return (
  <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
- <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, margin: 0, color: "#1B2430" }}>数据总览 Dashboard</h2>
+ <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, margin: 0, color: "#1B2430" }}>{tr("数据总览 Dashboard")}</h2>
  <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
- <Field label="统计区间 从 From"><DateInputDMY value={rangeStart} onChange={e => setRangeStart(e.target.value)} /></Field>
- <Field label="到 To"><DateInputDMY value={rangeEnd} onChange={e => setRangeEnd(e.target.value)} /></Field>
+ <Field label={tr("统计区间 从 From")}><DateInputDMY value={rangeStart} onChange={e => setRangeStart(e.target.value)} /></Field>
+ <Field label={tr("到 To")}><DateInputDMY value={rangeEnd} onChange={e => setRangeEnd(e.target.value)} /></Field>
  </div>
  </div>
 
  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
- <StatCard label="总Case数 Total Cases" value={cases.length} sub="全部 All" />
- <StatCard label="总成交额 Total Value" value={fmtMoney(totalValue)} sub="全部cases All Cases" />
- <StatCard label="已完成 Case Completed" value={completedCases} sub="Completed" color="#3C8C63" />
+ <StatCard label={tr("总Case数 Total Cases")} value={cases.length} sub={tr("全部 All")} />
+ <StatCard label={tr("总成交额 Total Value")} value={fmtMoney(totalValue)} sub={tr("全部cases All Cases")} />
+ <StatCard label={tr("已完成 Case Completed")} value={completedCases} sub="Completed" color="#3C8C63" />
  </div>
 
- <Panel title="报告中心 Report Center" sub={`选好上方日期区间后点按钮，报告会在下方视窗显示，可直接「打印 / 另存为PDF」— 当前区间：${dateRangeLabel(rangeStart, rangeEnd)}`}>
+ <Panel title={tr("报告中心 Report Center")} sub={`${tr("选好上方日期区间后点按钮，报告会在下方视窗显示，可直接「打印 / 另存为PDF」")} — ${dateRangeLabel(rangeStart, rangeEnd)}`}>
  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
- <Field label="报告只看 Agent Agent Filter（老板要看单一 Agent 的报告就用这个）">
+ <Field label={tr("报告只看 Agent Agent Filter（老板要看单一 Agent 的报告就用这个）")}>
  <select value={reportAgent} onChange={e => setReportAgent(e.target.value)} style={{ ...inputStyle, width: 220 }}>
- <option value="全部">全部 Agent All Agents</option>
+ <option value="全部">{tr("全部 Agent All Agents")}</option>
  {agentNames.map(a => <option key={a} value={a}>{a}</option>)}
  </select>
  </Field>
  {reportAgent !== "全部" && (
  <span style={{ fontSize: 11.5, color: "#2C5F8A", background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 6, padding: "4px 8px", alignSelf: "flex-end", marginBottom: 2 }}>
- 下面所有报告都只算 <b>{reportAgent}</b> 的 case（共 {reportCases.length} 个）
+ {tr("下面所有报告都只算")} <b>{reportAgent}</b> 的 case（共 {reportCases.length} 个）
  </span>
  )}
  </div>
  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
- <ReportGroup label="定金 / 付款进度 Deposit / Payment Progress" color={DEPT.payment.color}>
- <ReportBtn onClick={() => printReport(buildAgentFullListReportDoc(reportCases))}>Agent 全部 Case 名单 Agent Full Case List</ReportBtn>
- <ReportBtn onClick={() => printReport(buildDepositReportDoc(rangeStart, rangeEnd, reportCases))}>定金报告 Deposit Report</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPaymentThresholdReportDoc(60, rangeStart, rangeEnd, reportCases))}>60%以上付款 60%+ Paid</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPaymentThresholdReportDoc(100, rangeStart, rangeEnd, reportCases))}>全额付款 Full Payment</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPendingLoReportDoc(reportCases))}>等待LO Pending Letter of Offer</ReportBtn>
+ <ReportGroup label={tr("定金 / 付款进度 Deposit / Payment Progress")} color={DEPT.payment.color}>
+ <ReportBtn onClick={() => printReport(buildAgentFullListReportDoc(reportCases))}>{tr("Agent 全部 Case 名单 Agent Full Case List")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildDepositReportDoc(rangeStart, rangeEnd, reportCases))}>{tr("定金报告 Deposit Report")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPaymentThresholdReportDoc(60, rangeStart, rangeEnd, reportCases))}>{tr("60%以上付款 60%+ Paid")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPaymentThresholdReportDoc(100, rangeStart, rangeEnd, reportCases))}>{tr("全额付款 Full Payment")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPendingLoReportDoc(reportCases))}>{tr("等待LO Pending Letter of Offer")}</ReportBtn>
  </ReportGroup>
  <ReportGroup label="SEDA" color={DEPT.seda.color}>
- <ReportBtn onClick={() => printReport(buildSedaReportDoc(rangeStart, rangeEnd, reportCases))}>SEDA 申请报告 SEDA Application Report</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPendingSedaSubmissionReportDoc(reportCases))}>待提交SEDA Pending SEDA Submission</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPendingSedaApprovalReportDoc(reportCases))}>待批准SEDA Pending SEDA Approval</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildSedaReportDoc(rangeStart, rangeEnd, reportCases))}>{tr("SEDA 申请报告 SEDA Application Report")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPendingSedaSubmissionReportDoc(reportCases))}>{tr("待提交SEDA Pending SEDA Submission")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPendingSedaApprovalReportDoc(reportCases))}>{tr("待批准SEDA Pending SEDA Approval")}</ReportBtn>
  </ReportGroup>
  <ReportGroup label="TNB" color={DEPT.tnb.color}>
- <ReportBtn onClick={() => printReport(buildTnbReportDoc(rangeStart, rangeEnd, reportCases))}>TNB 申请报告 TNB Application Report</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPendingTnbApplicationReportDoc(reportCases))}>待申请TNB Pending TNB Application</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPendingWelcomeLetterReportDoc(reportCases))}>待收Welcome Letter Pending Welcome Letter</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildTnbReportDoc(rangeStart, rangeEnd, reportCases))}>{tr("TNB 申请报告 TNB Application Report")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPendingTnbApplicationReportDoc(reportCases))}>{tr("待申请TNB Pending TNB Application")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPendingWelcomeLetterReportDoc(reportCases))}>{tr("待收Welcome Letter Pending Welcome Letter")}</ReportBtn>
  </ReportGroup>
- <ReportGroup label="安装 / O&M / 汇总 Install / O&M / Summary" color={DEPT.install.color}>
- <ReportBtn onClick={() => printReport(buildInstallReportDoc(rangeStart, rangeEnd, reportCases))}>安装报告 Install Report</ReportBtn>
- <ReportBtn onClick={() => printReport(buildOutstandingAfterInstallReportDoc(reportCases))}>已安装未收全款 Installed but Not Fully Paid</ReportBtn>
- <ReportBtn onClick={() => printReport(buildInstallQueueReportDoc(reportCases))}>安装排队 Install Queue</ReportBtn>
- <ReportBtn onClick={() => printReport(buildShipmentReportDoc(rangeStart, rangeEnd, reportCases, itemDirectory))}>出货量报告 Shipment Report</ReportBtn>
- <ReportBtn onClick={() => printReport(buildOMReportDoc(reportCases))}>O&M 报告 O&M Report</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPropertyTypeSummaryDoc(rangeStart, rangeEnd, reportCases))}>物业类型汇总 Property Type Summary</ReportBtn>
+ <ReportGroup label={tr("安装 / O&M / 汇总 Install / O&M / Summary")} color={DEPT.install.color}>
+ <ReportBtn onClick={() => printReport(buildInstallReportDoc(rangeStart, rangeEnd, reportCases))}>{tr("安装报告 Install Report")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildOutstandingAfterInstallReportDoc(reportCases))}>{tr("已安装未收全款 Installed but Not Fully Paid")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildInstallQueueReportDoc(reportCases))}>{tr("安装排队 Install Queue")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildShipmentReportDoc(rangeStart, rangeEnd, reportCases, itemDirectory))}>{tr("出货量报告 Shipment Report")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildOMReportDoc(reportCases))}>{tr("O&M 报告 O&M Report")}</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildPropertyTypeSummaryDoc(rangeStart, rangeEnd, reportCases))}>{tr("物业类型汇总 Property Type Summary")}</ReportBtn>
  </ReportGroup>
- <ReportGroup label="取消配套 Cancelled Packages" color={DEPT.cancellation.color}>
- <ReportBtn onClick={() => printReport(buildCancellationReportDoc(rangeStart, rangeEnd, reportCases))}>取消配套报告 Cancellation Report</ReportBtn>
+ <ReportGroup label={tr("取消配套 Cancelled Packages")} color={DEPT.cancellation.color}>
+ <ReportBtn onClick={() => printReport(buildCancellationReportDoc(rangeStart, rangeEnd, reportCases))}>{tr("取消配套报告 Cancellation Report")}</ReportBtn>
  </ReportGroup>
- <ReportGroup label="文件记录 Document Log" color="#6B4E9E">
- <ReportBtn onClick={() => printReport(buildDocLogReportDoc(rangeStart, rangeEnd, reportCases, docLogs))}>文件记录 Document Log（Quotation / Invoice 生成记录）</ReportBtn>
+ <ReportGroup label={tr("文件记录 Document Log")} color="#6B4E9E">
+ <ReportBtn onClick={() => printReport(buildDocLogReportDoc(rangeStart, rangeEnd, reportCases, docLogs))}>{tr("文件记录 Document Log（Quotation / Invoice 生成记录）")}</ReportBtn>
  </ReportGroup>
  </div>
  </Panel>
 
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
- <Panel title={`成交 Deals · ${dateRangeLabel(rangeStart, rangeEnd)}`} sub={`共 ${dealsThisMonth.length} 个 case（以首次付款日期归类 By first payment date）`}>
+ <Panel title={`${tr("成交 Deals")} · ${dateRangeLabel(rangeStart, rangeEnd)}`} sub={`${dealsThisMonth.length} · ${tr("以首次付款日期归类 By first payment date")}`}>
  <TypeBars data={byType(dealsThisMonth)} />
- <CaseMiniList list={dealsThisMonth} emptyText="这段期间没有新定金 case No new deposits in this period" />
+ <CaseMiniList list={dealsThisMonth} emptyText={tr("这段期间没有新定金 case No new deposits in this period")} />
  </Panel>
- <Panel title={`安装完成 Installed · ${dateRangeLabel(rangeStart, rangeEnd)}`} sub={`共 ${installedThisMonth.length} 个 case`}>
+ <Panel title={`${tr("安装完成 Installed")} · ${dateRangeLabel(rangeStart, rangeEnd)}`} sub={`${installedThisMonth.length}`}>
  <TypeBars data={byType(installedThisMonth)} />
- <CaseMiniList list={installedThisMonth} emptyText="这段期间没有完成安装的 case No installs completed in this period" />
+ <CaseMiniList list={installedThisMonth} emptyText={tr("这段期间没有完成安装的 case No installs completed in this period")} />
  </Panel>
  </div>
 
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
- <Panel title="进度阶段分布 Stage Distribution" sub="全部 case All Cases">
+ <Panel title={tr("进度阶段分布 Stage Distribution")} sub={tr("全部 case All Cases")}>
  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
  {Object.entries(stageCounts).map(([label, count]) => (
  <div key={label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -3897,7 +4203,7 @@ function Dashboard({ cases, itemDirectory, docLogs }) {
  ))}
  </div>
  </Panel>
- <Panel title="付款进度分布 Payment Progress Distribution" sub="全部 case All Cases">
+ <Panel title={tr("付款进度分布 Payment Progress Distribution")} sub={tr("全部 case All Cases")}>
  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
  {buckets.map(b => (
  <div key={b.label} style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -4001,7 +4307,7 @@ function ReferralSubmitView({ presetCaseId, cases, onSubmit }) {
  </div>
  <div>
  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 15 }}>Eternalgy Sdn. Bhd.</div>
- <div style={{ fontSize: 11, color: "#9AA2AD" }}>转介人银行资料 Referral Bank Details</div>
+ <div style={{ fontSize: 11, color: "#9AA2AD" }}>{tr("转介人银行资料 Referral Bank Details")}</div>
  </div>
  </div>
  {children}
@@ -4036,13 +4342,13 @@ function ReferralSubmitView({ presetCaseId, cases, onSubmit }) {
  <div style={{ fontSize: 12.5, color: "#6B7686", marginBottom: 14, lineHeight: 1.6 }}>
  Admin <b></b>3YFZ4V
  </div>
- <Field label="案件代码 Case Code">
- <TextInput value={manualCode} onChange={e => setManualCode(e.target.value)} placeholder="例如 3YFZ4V" />
+ <Field label={tr("案件代码 Case Code")}>
+ <TextInput value={manualCode} onChange={e => setManualCode(e.target.value)} placeholder={tr("例如 3YFZ4V")} />
  </Field>
- {notFound && <div style={{ fontSize: 12, color: "#C24141", marginTop: 6 }}>找不到对应的转介资料，请确认代码是否正确，或联络 Admin。</div>}
+ {notFound && <div style={{ fontSize: 12, color: "#C24141", marginTop: 6 }}>{tr("找不到对应的转介资料，请确认代码是否正确，或联络 Admin。")}</div>}
  <button onClick={lookup} disabled={!manualCode.trim()}
  style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginTop: 14, opacity: manualCode.trim() ? 1 : 0.45, cursor: manualCode.trim() ? "pointer" : "not-allowed" }}>
- <Search size={14} /> 查找 Find
+ <Search size={14} /> {tr("查找 Find")}
  </button>
  </>
  );
@@ -4069,50 +4375,50 @@ function ReferralSubmitView({ presetCaseId, cases, onSubmit }) {
  <div style={{ fontSize: 13, color: "#6B7686", marginBottom: 4 }}>
  {submitted ? "谢谢你，你的资料已经送到 Eternalgy，我们会尽快处理。" : `你已经在 ${fmtDate(foundCase.referral.bankSubmittedAt)} 提交过资料了。`}
  </div>
- <div style={{ fontSize: 12, color: "#9AA2AD" }}>这个链接只能提交一次，如需更正资料，请直接联络 Admin。<br/>This link can only be used once. Contact Admin if you need to correct anything.</div>
+ <div style={{ fontSize: 12, color: "#9AA2AD" }}>{tr("这个链接只能提交一次，如需更正资料，请直接联络 Admin。")}<br/>This link can only be used once. Contact Admin if you need to correct anything.</div>
  </div>
  );
  }
 
  return shell(
  <>
- <div style={{ fontSize: 13.5, color: "#1B2430", marginBottom: 4 }}>你好，</div>
+ <div style={{ fontSize: 13.5, color: "#1B2430", marginBottom: 4 }}>{tr("你好，")}</div>
  <div style={{ fontSize: 12.5, color: "#6B7686", marginBottom: 18, lineHeight: 1.6 }}>
  <br/>
- <span style={{ color: "#C24141" }}>⚠️ 汇款只接受转介人本人户口，账户持有人姓名必须跟转介人本人姓名一致，不接受第三方户口。</span>
+ <span style={{ color: "#C24141" }}>{tr("⚠️ 汇款只接受转介人本人户口，账户持有人姓名必须跟转介人本人姓名一致，不接受第三方户口。")}</span>
  </div>
  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
- <Field label="转介人姓名 Full Name">
- <TextInput value={name} onChange={e => setName(e.target.value)} placeholder="与IC姓名一致" />
+ <Field label={tr("转介人姓名 Full Name")}>
+ <TextInput value={name} onChange={e => setName(e.target.value)} placeholder={tr("与IC姓名一致")} />
  </Field>
  <Field label="IC Number">
- <TextInput value={ic} onChange={e => setIc(e.target.value)} placeholder="身份证号码" />
+ <TextInput value={ic} onChange={e => setIc(e.target.value)} placeholder={tr("身份证号码")} />
  </Field>
  <Field label="TIN Number">
- <TextInput value={tin} onChange={e => setTin(e.target.value)} placeholder="TIN号码" />
+ <TextInput value={tin} onChange={e => setTin(e.target.value)} placeholder={tr("TIN号码")} />
  </Field>
  <Field label="Email Address">
  <TextInput value={email} onChange={e => setEmail(e.target.value)} placeholder="email@example.com" />
  </Field>
- <Field label="登记日期 Date">
+ <Field label={tr("登记日期 Date")}>
  <DateInputDMY value={regDate} onChange={e => setRegDate(e.target.value)} />
  </Field>
  <div style={{ borderTop: "1px solid #F0ECE1", paddingTop: 12, marginTop: 4, fontSize: 11.5, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>
- 银行户口资料 Bank Details
+ {tr("银行户口资料 Bank Details")}
  </div>
  <Field label="Bank Name">
  <TextInput value={bankName} onChange={e => setBankName(e.target.value)} placeholder="Maybank / CIMB..." />
  </Field>
- <Field label="银行账号 Account No.">
- <TextInput value={bankAccountNo} onChange={e => setBankAccountNo(e.target.value)} placeholder="账号" />
+ <Field label={tr("银行账号 Account No.")}>
+ <TextInput value={bankAccountNo} onChange={e => setBankAccountNo(e.target.value)} placeholder={tr("账号")} />
  </Field>
- <Field label="账户持有人 Account Holder">
+ <Field label={tr("账户持有人 Account Holder")}>
  <TextInput value={bankAccountHolder} onChange={e => setBankAccountHolder(e.target.value)} placeholder="IC Same as IC name" />
  </Field>
  </div>
  <button onClick={handleSubmit} disabled={!canSubmit}
  style={{ ...btnPrimary, width: "100%", justifyContent: "center", marginTop: 18, opacity: canSubmit ? 1 : 0.45, cursor: canSubmit ? "pointer" : "not-allowed" }}>
- <Save size={14} /> 提交 Submit
+ <Save size={14} /> {tr("提交 Submit")}
  </button>
  </>
  );
@@ -4128,6 +4434,20 @@ function App() {
  const [docLogs, setDocLogs] = useState(null);
  // Signed-in staff member, restored from localStorage so a refresh doesn't sign everyone out.
  // Only the id and name are kept — never the password.
+ const [lang, setLang] = useState(() => {
+ try { const v = localStorage.getItem(LANG_KEY); return LANGS.includes(v) ? v : "en"; }
+ catch { return "en"; }
+ });
+ // tr() reads this during the render pass that follows.
+ CURRENT_LANG = lang;
+ const cycleLang = useCallback(() => {
+ setLang(prev => {
+ const next = LANGS[(LANGS.indexOf(prev) + 1) % LANGS.length];
+ try { localStorage.setItem(LANG_KEY, next); } catch (e) { /* private mode */ }
+ return next;
+ });
+ }, []);
+
  const [currentOperator, setCurrentOperator] = useState(() => {
  try { const raw = localStorage.getItem(OPERATOR_KEY); return raw ? JSON.parse(raw) : null; }
  catch { return null; }
@@ -4248,7 +4568,7 @@ function App() {
  useEffect(() => { if (!simAgent && agents.length) setSimAgent(agents[0]); }, [agents, simAgent]);
 
  if (cases === null || agentDirectory === null || itemDirectory === null || adminDirectory === null || shipmentBatches === null || docLogs === null) {
- return <div style={{ padding: 40, fontFamily: "'Inter', sans-serif", color: "#6B7686" }}>加载中…</div>;
+ return <div style={{ padding: 40, fontFamily: "'Inter', sans-serif", color: "#6B7686" }}>{tr("加载中…")}</div>;
  }
 
  const hash = typeof window !== "undefined" ? window.location.hash : "";
@@ -4340,19 +4660,24 @@ function App() {
  </div>
  <div>
  <div style={{ fontFamily: "'Space Grotesk', sans-serif", color: "#fff", fontWeight: 700, fontSize: 15.5, lineHeight: 1.1 }}>Eternalgy Case Hub</div>
- <div style={{ color: "#B9C4D6", fontSize: 11 }}>恒浩能源 · 案件管理系统</div>
+ <div style={{ color: "#B9C4D6", fontSize: 11 }}>{tr("恒浩能源 · 案件管理系统")}</div>
  </div>
  </div>
  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+ <button onClick={cycleLang} title={tr("切换语言 Switch language")}
+ style={{ background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.25)", color: "#fff",
+ borderRadius: 9, padding: "6px 11px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+ 🌐 {LANG_LABELS[lang]}
+ </button>
  {currentOperator && (
  <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.1)", borderRadius: 9, padding: "6px 10px" }}>
  <span style={{ color: "#fff", fontSize: 12 }}>👤 {currentOperator.name}</span>
- <button onClick={signOut} style={{ background: "none", border: "none", color: "#C89B3C", fontSize: 11.5, cursor: "pointer", fontWeight: 600 }}>登出 Sign out</button>
+ <button onClick={signOut} style={{ background: "none", border: "none", color: "#C89B3C", fontSize: 11.5, cursor: "pointer", fontWeight: 600 }}>{tr("登出 Sign out")}</button>
  </div>
  )}
- <RoleTab active={role === "admin" && view.screen === "dashboard"} onClick={() => { setRole("admin"); setView({ screen: "dashboard" }); }} icon={LayoutDashboard} label="数据总览 Dashboard" />
- <RoleTab active={role === "admin"} onClick={() => { setRole("admin"); setView({ screen: "list" }); }} icon={FolderKanban} label="Admin 总部" />
- <RoleTab active={role === "agent"} onClick={() => { setRole("agent"); setView({ screen: "agentList" }); }} icon={Link2} label="Agent 视角（模拟链接）" />
+ <RoleTab active={role === "admin" && view.screen === "dashboard"} onClick={() => { setRole("admin"); setView({ screen: "dashboard" }); }} icon={LayoutDashboard} label={tr("数据总览 Dashboard")} />
+ <RoleTab active={role === "admin"} onClick={() => { setRole("admin"); setView({ screen: "list" }); }} icon={FolderKanban} label={tr("Admin 总部")} />
+ <RoleTab active={role === "agent"} onClick={() => { setRole("agent"); setView({ screen: "agentList" }); }} icon={Link2} label={tr("Agent 视角（模拟链接）")} />
  </div>
  </div>
 
@@ -4407,31 +4732,31 @@ function AgentForm({ initial, onSave, onCancel, onDelete }) {
  return (
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 18, display: "flex", flexDirection: "column", gap: 12, maxWidth: 560 }}>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
- <Field label="Agent 姓名 Name">
- <TextInput value={a.name} onChange={e => set("name", e.target.value)} placeholder="Agent姓名" />
+ <Field label={tr("Agent 姓名 Name")}>
+ <TextInput value={a.name} onChange={e => set("name", e.target.value)} placeholder={tr("Agent姓名")} />
  </Field>
  <Field label="Agent Code">
- <TextInput value={a.code} onChange={e => set("code", e.target.value)} placeholder="如 AG001" />
+ <TextInput value={a.code} onChange={e => set("code", e.target.value)} placeholder={tr("如 AG001")} />
  </Field>
- <Field label="联系号码 Phone">
+ <Field label={tr("联系号码 Phone")}>
  <TextInput value={a.phone} onChange={e => set("phone", e.target.value)} placeholder="012-3456789" />
  </Field>
  <Field label="Email Address">
  <TextInput value={a.email} onChange={e => set("email", e.target.value)} placeholder="email@example.com" />
  </Field>
- <Field label="介绍人 Referrer">
- <TextInput value={a.referrer} onChange={e => set("referrer", e.target.value)} placeholder="谁介绍这个Agent加入（内部存档，不会显示在配套/PDF）" />
+ <Field label={tr("介绍人 Referrer")}>
+ <TextInput value={a.referrer} onChange={e => set("referrer", e.target.value)} placeholder={tr("谁介绍这个Agent加入（内部存档，不会显示在配套/PDF）")} />
  </Field>
  </div>
- <Field label="备注 Note">
+ <Field label={tr("备注 Note")}>
  <TextArea value={a.note} onChange={e => set("note", e.target.value)} placeholder="Internal notes" />
  </Field>
- <div style={{ fontSize: 11, color: "#B5AE9E" }}>以上资料只作内部存档；配套和PDF只会显示 Agent 姓名 + Agent Code。</div>
+ <div style={{ fontSize: 11, color: "#B5AE9E" }}>{tr("以上资料只作内部存档；配套和PDF只会显示 Agent 姓名 + Agent Code。")}</div>
  <div style={{ display: "flex", justifyContent: "space-between" }}>
- <div>{onDelete && <button onClick={onDelete} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}><Trash2 size={13}/> 删除</button>}</div>
+ <div>{onDelete && <button onClick={onDelete} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}><Trash2 size={13}/> {tr("删除")}</button>}</div>
  <div style={{ display: "flex", gap: 10 }}>
  <button onClick={onCancel} style={btnGhost}></button>
- <button onClick={() => onSave(a)} disabled={!a.name.trim()} style={{ ...btnPrimary, opacity: a.name.trim() ? 1 : 0.45 }}><Save size={14}/> 保存</button>
+ <button onClick={() => onSave(a)} disabled={!a.name.trim()} style={{ ...btnPrimary, opacity: a.name.trim() ? 1 : 0.45 }}><Save size={14}/> {tr("保存")}</button>
  </div>
  </div>
  </div>
@@ -4444,32 +4769,32 @@ function AdminAccountForm({ initial, onSave, onCancel, onDelete }) {
  return (
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 18, display: "flex", flexDirection: "column", gap: 12, maxWidth: 480 }}>
  <div style={{ background: "#FBF8F0", border: "1px dashed #E3D8B8", borderRadius: 10, padding: 10, fontSize: 11.5, color: "#8A6414" }}>
- ⚠️ 提醒：这个密码只是一个简单的防呆机制（防止手滑/没权限的人乱改），不是银行等级的加密安全——请不要用跟其他重要账号一样的密码。
+ {tr("⚠️ 提醒：这个密码只是一个简单的防呆机制（防止手滑/没权限的人乱改），不是银行等级的加密安全——请不要用跟其他重要账号一样的密码。")}
  </div>
- <Field label="姓名 Name（会显示在修改记录 Edit History 里）">
- <TextInput value={a.name} onChange={e => set("name", e.target.value)} placeholder="登入用的姓名" />
+ <Field label={tr("姓名 Name（会显示在修改记录 Edit History 里）")}>
+ <TextInput value={a.name} onChange={e => set("name", e.target.value)} placeholder={tr("登入用的姓名")} />
  </Field>
- <Field label="部门 Department">
- <TextInput value={a.department || ""} onChange={e => set("department", e.target.value)} placeholder="例如 IT / Admin / Sales / Warehouse" />
+ <Field label={tr("部门 Department")}>
+ <TextInput value={a.department || ""} onChange={e => set("department", e.target.value)} placeholder={tr("例如 IT / Admin / Sales / Warehouse")} />
  </Field>
- <Field label="Email Address（登入身份用这个，但显示的是姓名）">
+ <Field label={tr("Email Address（登入身份用这个，但显示的是姓名）")}>
  <TextInput value={a.email} onChange={e => set("email", e.target.value.toLowerCase())} placeholder="name@eternalgy.com" />
  </Field>
- <Field label="密码 Password">
+ <Field label={tr("密码 Password")}>
  <input type="text" value={a.password} onChange={e => set("password", e.target.value.toUpperCase())}
- placeholder="密码" style={{ ...inputStyle, textTransform: "uppercase" }} />
+ placeholder={tr("密码")} style={{ ...inputStyle, textTransform: "uppercase" }} />
  </Field>
- <Field label="联系号码 Phone">
+ <Field label={tr("联系号码 Phone")}>
  <TextInput value={a.phone} onChange={e => set("phone", e.target.value)} placeholder="012-3456789" />
  </Field>
- <Field label="备注 Note">
+ <Field label={tr("备注 Note")}>
  <TextArea value={a.note} onChange={e => set("note", e.target.value)} placeholder="Internal notes" />
  </Field>
  <div style={{ display: "flex", justifyContent: "space-between" }}>
- <div>{onDelete && <button onClick={onDelete} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}><Trash2 size={13}/> 删除</button>}</div>
+ <div>{onDelete && <button onClick={onDelete} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}><Trash2 size={13}/> {tr("删除")}</button>}</div>
  <div style={{ display: "flex", gap: 10 }}>
  <button onClick={onCancel} style={btnGhost}></button>
- <button onClick={() => onSave(a)} disabled={!a.name.trim() || !a.password.trim()} style={{ ...btnPrimary, opacity: (a.name.trim() && a.password.trim()) ? 1 : 0.45 }}><Save size={14}/> 保存</button>
+ <button onClick={() => onSave(a)} disabled={!a.name.trim() || !a.password.trim()} style={{ ...btnPrimary, opacity: (a.name.trim() && a.password.trim()) ? 1 : 0.45 }}><Save size={14}/> {tr("保存")}</button>
  </div>
  </div>
  </div>
@@ -4499,7 +4824,7 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  if (editing) {
  return (
  <div>
- <button onClick={() => setEditing(null)} style={{ ...btnGhost, marginBottom: 16 }}><ArrowLeft size={14}/> 返回列表 Back</button>
+ <button onClick={() => setEditing(null)} style={{ ...btnGhost, marginBottom: 16 }}><ArrowLeft size={14}/> {tr("返回列表 Back")}</button>
  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, margin: "0 0 16px", color: "#1B2430" }}>
  {editing.isNew ? "新增员工账号 Add Staff Account" : "编辑员工账号 Edit Staff Account"}
  </h2>
@@ -4519,32 +4844,32 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  const docs = mine.filter(ev => ev.kind === "doc").length;
  return (
  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
- <button onClick={() => setViewing(null)} style={{ ...btnGhost, alignSelf: "flex-start" }}><ArrowLeft size={14}/> 返回列表 Back</button>
+ <button onClick={() => setViewing(null)} style={{ ...btnGhost, alignSelf: "flex-start" }}><ArrowLeft size={14}/> {tr("返回列表 Back")}</button>
  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
  <div>
  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, margin: 0, color: "#1B2430" }}>
  {viewing.name}
- {currentOperator && currentOperator.id === viewing.id && <span style={{ fontSize: 12, color: "#3C8C63", marginLeft: 8 }}>（你 You）</span>}
+ {currentOperator && currentOperator.id === viewing.id && <span style={{ fontSize: 12, color: "#3C8C63", marginLeft: 8 }}>{tr("（你 You）")}</span>}
  </h2>
  <div style={{ fontSize: 12, color: "#9AA2AD", marginTop: 3 }}>
  修改 {edits} 次 Edits &nbsp;·&nbsp; 生成文件 {docs} 份 Documents &nbsp;·&nbsp; 最后活动 Last active: {mine.length ? fmtStamp(mine[0].at) : "-"}
  </div>
  </div>
- <button onClick={() => setEditing({ isNew: false, account: viewing })} style={btnGhost}><PenLine size={13}/> 编辑账号 Edit account</button>
+ <button onClick={() => setEditing({ isNew: false, account: viewing })} style={btnGhost}><PenLine size={13}/> {tr("编辑账号 Edit account")}</button>
  </div>
  <div style={{ display: "flex", gap: 8 }}>
- <StaffTabBtn active={detailTab === "activity"} onClick={() => setDetailTab("activity")}>活动记录 Activity</StaffTabBtn>
- <StaffTabBtn active={detailTab === "profile"} onClick={() => setDetailTab("profile")}>账号资料 Profile</StaffTabBtn>
+ <StaffTabBtn active={detailTab === "activity"} onClick={() => setDetailTab("activity")}>{tr("活动记录 Activity")}</StaffTabBtn>
+ <StaffTabBtn active={detailTab === "profile"} onClick={() => setDetailTab("profile")}>{tr("账号资料 Profile")}</StaffTabBtn>
  </div>
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: detailTab === "profile" ? 18 : 0, overflow: "hidden" }}>
  {detailTab === "activity"
- ? <ActivityTable events={mine} emptyText="这位员工还没有任何记录 No activity recorded yet." />
+ ? <ActivityTable events={mine} emptyText={tr("这位员工还没有任何记录 No activity recorded yet.")} />
  : (
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, fontSize: 13 }}>
- <div><div style={{ fontSize: 11.5, color: "#9AA2AD" }}>姓名 Name</div>{viewing.name || "-"}</div>
+ <div><div style={{ fontSize: 11.5, color: "#9AA2AD" }}>{tr("姓名 Name")}</div>{viewing.name || "-"}</div>
  <div><div style={{ fontSize: 11.5, color: "#9AA2AD" }}>Email</div>{viewing.email || "-"}</div>
- <div><div style={{ fontSize: 11.5, color: "#9AA2AD" }}>电话 Phone</div>{viewing.phone || "-"}</div>
- <div><div style={{ fontSize: 11.5, color: "#9AA2AD" }}>备注 Note</div>{viewing.note || "-"}</div>
+ <div><div style={{ fontSize: 11.5, color: "#9AA2AD" }}>{tr("电话 Phone")}</div>{viewing.phone || "-"}</div>
+ <div><div style={{ fontSize: 11.5, color: "#9AA2AD" }}>{tr("备注 Note")}</div>{viewing.note || "-"}</div>
  </div>
  )}
  </div>
@@ -4558,7 +4883,7 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  <div style={{ fontSize: 12, color: "#9AA2AD" }}>共 {adminDirectory.length} 位员工 — 点名字看该员工的活动记录。忘记密码可以请其他同事帮忙在这里重设。<br />Click a name to see that person's activity log.</div>
  <div style={{ display: "flex", gap: 8 }}>
  <button onClick={() => setShowPasswords(v => !v)} style={btnGhost}>{showPasswords ? "隐藏密码 Hide passwords" : "显示密码 Show passwords"}</button>
- <button onClick={() => setEditing({ isNew: true, account: emptyAdminAccount() })} style={btnPrimary}><Plus size={14}/> 新增员工账号 Add Staff</button>
+ <button onClick={() => setEditing({ isNew: true, account: emptyAdminAccount() })} style={btnPrimary}><Plus size={14}/> {tr("新增员工账号 Add Staff")}</button>
  </div>
  </div>
 
@@ -4571,13 +4896,13 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
  <thead>
  <tr style={{ background: "#FBFAF6", textAlign: "left" }}>
- <th style={thStyle}>姓名 Name</th>
- <th style={thStyle}>部门 Department</th>
+ <th style={thStyle}>{tr("姓名 Name")}</th>
+ <th style={thStyle}>{tr("部门 Department")}</th>
  <th style={thStyle}>Email</th>
- <th style={thStyle}>电话 Phone</th>
- <th style={thStyle}>密码 Password</th>
- <th style={thStyle}>记录 Records</th>
- <th style={thStyle}>最后活动 Last Active</th>
+ <th style={thStyle}>{tr("电话 Phone")}</th>
+ <th style={thStyle}>{tr("密码 Password")}</th>
+ <th style={thStyle}>{tr("记录 Records")}</th>
+ <th style={thStyle}>{tr("最后活动 Last Active")}</th>
  <th style={thStyle}></th>
  </tr>
  </thead>
@@ -4590,7 +4915,7 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
  <td style={{ ...tdStyle, fontWeight: 600 }}>
  {acc.name}
- {currentOperator && currentOperator.id === acc.id && <span style={{ fontSize: 11, color: "#3C8C63", marginLeft: 6 }}>（你 You）</span>}
+ {currentOperator && currentOperator.id === acc.id && <span style={{ fontSize: 11, color: "#3C8C63", marginLeft: 6 }}>{tr("（你 You）")}</span>}
  </td>
  <td style={tdStyle}>{acc.department || "-"}</td>
  <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>{acc.email || "-"}</td>
@@ -4602,7 +4927,7 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, color: "#6B7686" }}>{s.last ? fmtStamp(s.last) : "-"}</td>
  <td style={tdStyle}>
  <button onClick={e => { e.stopPropagation(); setEditing({ isNew: false, account: acc }); }} style={{ ...btnGhost, padding: "4px 9px", fontSize: 11.5 }}>
- <PenLine size={12}/> 编辑 Edit
+ <PenLine size={12}/> {tr("编辑 Edit")}
  </button>
  </td>
  </tr>
@@ -4614,13 +4939,13 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  )}
 
  <div>
- <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 6 }}>最近活动 Recent Activity</div>
+ <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 6 }}>{tr("最近活动 Recent Activity")}</div>
  <div style={{ fontSize: 11.5, color: "#9AA2AD", marginBottom: 8 }}>
- 全体员工最近 50 条记录。Case 被删除时，它的修改记录也会一并消失。
+ {tr("全体员工最近 50 条记录。Case 被删除时，它的修改记录也会一并消失。")}
  <br />Latest 50 records across all staff. A case's history is deleted along with the case.
  </div>
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, overflow: "hidden" }}>
- <ActivityTable events={feed.slice(0, 50)} emptyText="还没有任何活动记录 No activity recorded yet." />
+ <ActivityTable events={feed.slice(0, 50)} emptyText={tr("还没有任何活动记录 No activity recorded yet.")} />
  </div>
  </div>
  </div>
@@ -4692,60 +5017,60 @@ function SignInPage({ adminDirectory, onSignIn, saveAdminAccount }) {
  <img src={LOGO_MARK} alt="Eternalgy" style={{ height: 38, width: "auto", display: "block" }} />
  <div>
  <div style={{ fontFamily: "'Space Grotesk', sans-serif", color: "#fff", fontWeight: 700, fontSize: 18, lineHeight: 1.15 }}>Eternalgy CRM</div>
- <div style={{ color: "#B9C4D6", fontSize: 11.5 }}>恒浩能源 · 案件管理系统</div>
+ <div style={{ color: "#B9C4D6", fontSize: 11.5 }}>{tr("恒浩能源 · 案件管理系统")}</div>
  </div>
  </div>
 
  <div style={{ background: "#fff", borderRadius: 16, padding: 26, boxShadow: "0 18px 40px rgba(0,0,0,0.25)" }}>
  {noAccounts ? (
  <>
- <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 17, marginBottom: 4 }}>建立第一个账号 First Account</div>
+ <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 17, marginBottom: 4 }}>{tr("建立第一个账号 First Account")}</div>
  <div style={{ fontSize: 12.5, color: "#6B7686", marginBottom: 18 }}>
- 系统还没有任何员工账号。建立第一个账号后就能登入，之后可以在「员工管理」新增其他同事。
+ {tr("系统还没有任何员工账号。建立第一个账号后就能登入，之后可以在「员工管理」新增其他同事。")}
  <br />No staff accounts exist yet. Create the first one to sign in.
  </div>
  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
- <Field label="姓名 Name">
- <TextInput value={firstName} onChange={e => setFirstName(e.target.value)} placeholder="你的名字" />
+ <Field label={tr("姓名 Name")}>
+ <TextInput value={firstName} onChange={e => setFirstName(e.target.value)} placeholder={tr("你的名字")} />
  </Field>
- <Field label="密码 Password">
+ <Field label={tr("密码 Password")}>
  <input type="password" value={firstPassword} onChange={e => setFirstPassword(e.target.value)}
  onKeyDown={e => e.key === "Enter" && firstName.trim() && firstPassword && createFirst()}
- style={inputStyle} placeholder="设定一个密码" />
+ style={inputStyle} placeholder={tr("设定一个密码")} />
  </Field>
  <button onClick={createFirst} disabled={!firstName.trim() || !firstPassword}
  style={{ ...btnPrimary, justifyContent: "center", opacity: (firstName.trim() && firstPassword) ? 1 : 0.45 }}>
- 建立并登入 Create & Sign in
+ {tr("建立并登入 Create & Sign in")}
  </button>
  </div>
  </>
  ) : (
  <>
- <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 17, marginBottom: 4 }}>员工登入 Staff Sign in</div>
- <div style={{ fontSize: 12.5, color: "#6B7686", marginBottom: 18 }}>每一次修改都会记录在你的名下。<br />Every change is recorded under your name.</div>
+ <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 17, marginBottom: 4 }}>{tr("员工登入 Staff Sign in")}</div>
+ <div style={{ fontSize: 12.5, color: "#6B7686", marginBottom: 18 }}>{tr("每一次修改都会记录在你的名下。")}<br />Every change is recorded under your name.</div>
  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
- <Field label="姓名 Name">
+ <Field label={tr("姓名 Name")}>
  <select value={name} onChange={e => { setName(e.target.value); setError(""); }} style={inputStyle}>
- <option value="">选择你的名字… Select your name…</option>
+ <option value="">{tr("选择你的名字… Select your name…")}</option>
  {adminDirectory.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
  </select>
  </Field>
- <Field label="密码 Password">
+ <Field label={tr("密码 Password")}>
  <input type="password" value={password} onChange={e => { setPassword(e.target.value); setError(""); }}
  onKeyDown={e => e.key === "Enter" && name && password && submit()}
- style={inputStyle} placeholder="密码 Password" />
+ style={inputStyle} placeholder={tr("密码 Password")} />
  </Field>
  {error && <div style={{ fontSize: 12, color: "#C24141" }}>{error}</div>}
  <button onClick={submit} disabled={!name || !password}
  style={{ ...btnPrimary, justifyContent: "center", opacity: (name && password) ? 1 : 0.45 }}>
- 登入 Sign in
+ {tr("登入 Sign in")}
  </button>
  </div>
  </>
  )}
  </div>
  <div style={{ textAlign: "center", color: "#8FA3BF", fontSize: 11, marginTop: 14 }}>
- 忘记密码？请其他同事在「员工管理」帮你重设。<br />Forgot your password? Ask a colleague to reset it under Staff Accounts.
+ {tr("忘记密码？请其他同事在「员工管理」帮你重设。")}<br />Forgot your password? Ask a colleague to reset it under Staff Accounts.
  </div>
  </div>
  </div>
@@ -4804,9 +5129,9 @@ function ActivityTable({ events, emptyText }) {
  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
  <thead>
  <tr style={{ background: "#FBFAF6", textAlign: "left" }}>
- <th style={thStyle}>时间 When</th>
- <th style={thStyle}>员工 Staff</th>
- <th style={thStyle}>动作 Action</th>
+ <th style={thStyle}>{tr("时间 When")}</th>
+ <th style={thStyle}>{tr("员工 Staff")}</th>
+ <th style={thStyle}>{tr("动作 Action")}</th>
  <th style={thStyle}>Case</th>
  </tr>
  </thead>
@@ -4816,12 +5141,64 @@ function ActivityTable({ events, emptyText }) {
  );
 }
 
+// A plain <select> stops being usable once the agent list is long — this filters as you type,
+// matching on either name or code, and closes on an outside click.
+function AgentPicker({ agentDirectory, agentName, onPick }) {
+ const [query, setQuery] = useState("");
+ const [open, setOpen] = useState(false);
+ const boxRef = useRef(null);
+
+ useEffect(() => {
+ const onDocClick = (e) => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+ document.addEventListener("mousedown", onDocClick);
+ return () => document.removeEventListener("mousedown", onDocClick);
+ }, []);
+
+ const q = query.trim().toLowerCase();
+ const matches = (agentDirectory || []).filter(a =>
+ !q || (a.name || "").toLowerCase().includes(q) || (a.code || "").toLowerCase().includes(q)
+ );
+ const selected = (agentDirectory || []).find(a => a.name === agentName);
+
+ return (
+ <div ref={boxRef} style={{ position: "relative" }}>
+ <input
+ value={open ? query : (selected ? `${selected.name}${selected.code ? ` (${selected.code})` : ""}` : "")}
+ onChange={e => { setQuery(e.target.value); setOpen(true); }}
+ onFocus={() => { setQuery(""); setOpen(true); }}
+ placeholder={tr("搜 Agent 姓名或代号 Search agent…")}
+ style={{ ...inputStyle, padding: "5px 7px", fontSize: 12,
+ ...(agentName ? {} : { borderColor: "#C24141", background: "#FBEAEA" }) }}
+ />
+ {open && (
+ <div style={{ position: "absolute", top: "100%", left: 0, right: 0, zIndex: 30, background: "#fff",
+ border: "1px solid #E9E4D8", borderRadius: 8, marginTop: 2, maxHeight: 220, overflowY: "auto",
+ boxShadow: "0 8px 20px rgba(0,0,0,0.10)" }}>
+ <div onMouseDown={() => { onPick(null); setOpen(false); }}
+ style={{ padding: "7px 10px", fontSize: 12, color: "#9AA2AD", cursor: "pointer", borderBottom: "1px solid #F0ECE1" }}>
+ {tr("— 清空 Clear —")}
+ </div>
+ {matches.length === 0 ? (
+ <div style={{ padding: "7px 10px", fontSize: 12, color: "#B5AE9E" }}>{tr("没有符合的 Agent No match")}</div>
+ ) : matches.map(a => (
+ <div key={a.id} onMouseDown={() => { onPick(a); setOpen(false); }}
+ style={{ padding: "7px 10px", fontSize: 12, cursor: "pointer",
+ background: a.name === agentName ? "#FBF8F0" : "transparent" }}>
+ {a.name}{a.code ? <span style={{ color: "#9AA2AD" }}> ({a.code})</span> : null}
+ </div>
+ ))}
+ </div>
+ )}
+ </div>
+ );
+}
+
 function AgentDirectoryArea({ agentDirectory, saveAgent, deleteAgent }) {
  const [editing, setEditing] = useState(null);
  if (editing) {
  return (
  <div>
- <button onClick={() => setEditing(null)} style={{ ...btnGhost, marginBottom: 16 }}><ArrowLeft size={14}/> 返回列表</button>
+ <button onClick={() => setEditing(null)} style={{ ...btnGhost, marginBottom: 16 }}><ArrowLeft size={14}/> {tr("返回列表 Back")}</button>
  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, margin: "0 0 16px", color: "#1B2430" }}>
  {editing.isNew ? "新增 Agent" : "编辑 Agent"}
  </h2>
@@ -4838,7 +5215,7 @@ function AgentDirectoryArea({ agentDirectory, saveAgent, deleteAgent }) {
  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
  <div style={{ fontSize: 12, color: "#9AA2AD" }}>共 {agentDirectory.length} 位 Agent — 新增 Case 时会从这里选择</div>
- <button onClick={() => setEditing({ isNew: true, agent: emptyAgent() })} style={btnPrimary}><Plus size={14}/> 新增 Agent</button>
+ <button onClick={() => setEditing({ isNew: true, agent: emptyAgent() })} style={btnPrimary}><Plus size={14}/> {tr("新增 Agent")}</button>
  </div>
  {agentDirectory.length === 0 ? (
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 24 }}>
@@ -4849,11 +5226,11 @@ function AgentDirectoryArea({ agentDirectory, saveAgent, deleteAgent }) {
  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
  <thead>
  <tr style={{ background: "#FBFAF6", textAlign: "left" }}>
- <th style={thStyle}>姓名 Name</th>
+ <th style={thStyle}>{tr("姓名 Name")}</th>
  <th style={thStyle}>Code</th>
- <th style={thStyle}>电话 Phone</th>
+ <th style={thStyle}>{tr("电话 Phone")}</th>
  <th style={thStyle}>Email</th>
- <th style={thStyle}>介绍人 Referrer</th>
+ <th style={thStyle}>{tr("介绍人 Referrer")}</th>
  </tr>
  </thead>
  <tbody>
@@ -4886,20 +5263,20 @@ function ItemForm({ initial, onSave, onCancel, onDelete, shippedMap }) {
  return (
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 18, display: "flex", flexDirection: "column", gap: 12, maxWidth: 560 }}>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
- <Field label="种类 Category">
+ <Field label={tr("种类 Category")}>
  <Select value={it.category} onChange={e => set("category", e.target.value)} options={ITEM_CATEGORIES} />
  </Field>
- <Field label="型号 / 名称 Item Name">
- <TextInput value={it.name} onChange={e => set("name", e.target.value)} placeholder="如：650W JinkoSolar Tiger Neo 3.0" />
+ <Field label={tr("型号 / 名称 Item Name")}>
+ <TextInput value={it.name} onChange={e => set("name", e.target.value)} placeholder={tr("如：650W JinkoSolar Tiger Neo 3.0")} />
  </Field>
  </div>
  {it.category === "Panel" && (
  <Field label="Watt (W) kWp">
- <NumberInput value={it.watt} onChange={e => set("watt", e.target.value)} placeholder="如 650" style={{ maxWidth: 200 }} />
+ <NumberInput value={it.watt} onChange={e => set("watt", e.target.value)} placeholder={tr("如 650")} style={{ maxWidth: 200 }} />
  </Field>
  )}
- <Field label="收款说明 Description">
- <TextArea value={it.description} onChange={e => set("description", e.target.value)} placeholder="专业的产品描述，例如：650W JinkoSolar Tiger Neo 3.0 Panel N-Type TOPCon" style={{ minHeight: 70 }} />
+ <Field label={tr("收款说明 Description")}>
+ <TextArea value={it.description} onChange={e => set("description", e.target.value)} placeholder={tr("专业的产品描述，例如：650W JinkoSolar Tiger Neo 3.0 Panel N-Type TOPCon")} style={{ minHeight: 70 }} />
  </Field>
  <Field label="Note /PDF">
  <TextArea value={it.note} onChange={e => set("note", e.target.value)} placeholder="Internal notes" />
@@ -4907,33 +5284,33 @@ function ItemForm({ initial, onSave, onCancel, onDelete, shippedMap }) {
 
  <div style={{ borderTop: "1px solid #F0ECE1", paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
- <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>进货记录 Stock In Records</div>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>{tr("进货记录 Stock In Records")}</div>
  {stock && (
  <div style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: "'IBM Plex Mono', monospace" }}>
- <span>进货 In: <b>{stock.stockIn}</b></span>
- <span>已出货 Shipped: <b>{stock.shipped}</b></span>
- <span style={{ color: stock.remaining < 0 ? "#C24141" : "#3C8C63" }}>库存 Stock: <b>{stock.remaining}</b></span>
+ <span>{tr("进货 In:")} <b>{stock.stockIn}</b></span>
+ <span>{tr("已出货 Shipped:")} <b>{stock.shipped}</b></span>
+ <span style={{ color: stock.remaining < 0 ? "#C24141" : "#3C8C63" }}>{tr("库存 Stock:")} <b>{stock.remaining}</b></span>
  </div>
  )}
  </div>
  {(it.stockIns || []).map(r => (
  <div key={r.id} style={{ display: "grid", gridTemplateColumns: "155px 100px 1fr auto", gap: 8, alignItems: "center" }}>
  <DateInputDMY value={r.date} onChange={e => updateStockIn(r.id, "date", e.target.value)} />
- <NumberInput value={r.qty} onChange={e => updateStockIn(r.id, "qty", e.target.value)} placeholder="数量 Qty" />
- <TextInput value={r.note} onChange={e => updateStockIn(r.id, "note", e.target.value)} placeholder="备注 Note（如：供应商 / PO号）" />
+ <NumberInput value={r.qty} onChange={e => updateStockIn(r.id, "qty", e.target.value)} placeholder={tr("数量 Qty")} />
+ <TextInput value={r.note} onChange={e => updateStockIn(r.id, "note", e.target.value)} placeholder={tr("备注 Note（如：供应商 / PO号）")} />
  <button onClick={() => removeStockIn(r.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141" }}>
  <Trash2 size={14} />
  </button>
  </div>
  ))}
- <button onClick={addStockIn} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> 新增进货记录 Add Stock In</button>
+ <button onClick={addStockIn} style={{ ...btnGhost, alignSelf: "flex-start" }}><Plus size={13}/> {tr("新增进货记录 Add Stock In")}</button>
  </div>
 
  <div style={{ display: "flex", justifyContent: "space-between" }}>
- <div>{onDelete && <button onClick={onDelete} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}><Trash2 size={13}/> 删除</button>}</div>
+ <div>{onDelete && <button onClick={onDelete} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}><Trash2 size={13}/> {tr("删除")}</button>}</div>
  <div style={{ display: "flex", gap: 10 }}>
  <button onClick={onCancel} style={btnGhost}></button>
- <button onClick={() => onSave(it)} disabled={!it.name.trim()} style={{ ...btnPrimary, opacity: it.name.trim() ? 1 : 0.45 }}><Save size={14}/> 保存</button>
+ <button onClick={() => onSave(it)} disabled={!it.name.trim()} style={{ ...btnPrimary, opacity: it.name.trim() ? 1 : 0.45 }}><Save size={14}/> {tr("保存")}</button>
  </div>
  </div>
  </div>
@@ -4947,7 +5324,7 @@ function ItemDirectoryArea({ itemDirectory, saveItem, deleteItem, cases }) {
  if (editing) {
  return (
  <div>
- <button onClick={() => setEditing(null)} style={{ ...btnGhost, marginBottom: 16 }}><ArrowLeft size={14}/> 返回列表</button>
+ <button onClick={() => setEditing(null)} style={{ ...btnGhost, marginBottom: 16 }}><ArrowLeft size={14}/> {tr("返回列表 Back")}</button>
  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, margin: "0 0 16px", color: "#1B2430" }}>
  {editing.isNew ? "Add Item" : "Edit Item"}
  </h2>
@@ -4972,7 +5349,7 @@ function ItemDirectoryArea({ itemDirectory, saveItem, deleteItem, cases }) {
  </select>
  <div style={{ fontSize: 12, color: "#9AA2AD", alignSelf: "center" }}>共 {list.length} 项</div>
  </div>
- <button onClick={() => setEditing({ isNew: true, item: emptyItem() })} style={btnPrimary}><Plus size={14}/> 新增货物</button>
+ <button onClick={() => setEditing({ isNew: true, item: emptyItem() })} style={btnPrimary}><Plus size={14}/> {tr("新增货物")}</button>
  </div>
  {list.length === 0 ? (
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 24 }}>
@@ -4983,10 +5360,10 @@ function ItemDirectoryArea({ itemDirectory, saveItem, deleteItem, cases }) {
  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
  <thead>
  <tr style={{ background: "#FBFAF6", textAlign: "left" }}>
- <th style={thStyle}>种类 Category</th>
- <th style={thStyle}>型号 / 名称</th>
+ <th style={thStyle}>{tr("种类 Category")}</th>
+ <th style={thStyle}>{tr("型号 / 名称")}</th>
  <th style={{ ...thStyle, width: "35%" }}>Description</th>
- <th style={thStyle}>库存 Stock</th>
+ <th style={thStyle}>{tr("库存 Stock")}</th>
  </tr>
  </thead>
  <tbody>
@@ -5049,21 +5426,21 @@ function ShipmentBatchArea({ batches, saveBatch, deleteBatch, cases }) {
  return (
  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
- <button onClick={() => setOpenId(null)} style={btnGhost}><ArrowLeft size={14}/> 返回批次列表</button>
+ <button onClick={() => setOpenId(null)} style={btnGhost}><ArrowLeft size={14}/> {tr("返回批次列表")}</button>
  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, color: "#3C8C63", fontWeight: 600 }}>
- <CheckCircle2 size={13} /> 自动保存 Auto-saved — 打字/选好就立刻存档，不用另外按保存
+ <CheckCircle2 size={13} /> {tr("自动保存 Auto-saved — 打字/选好就立刻存档，不用另外按保存")}
  </div>
  </div>
 
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 18, display: "flex", flexDirection: "column", gap: 12 }}>
- <Field label="批次名称 Batch Label（例如：01/06 - 07/06 出货）">
- <TextInput value={openBatch.label} onChange={e => setLabel(e.target.value)} placeholder="第一批 / 01/06-07/06 …" />
+ <Field label={tr("批次名称 Batch Label（例如：01/06 - 07/06 出货）")}>
+ <TextInput value={openBatch.label} onChange={e => setLabel(e.target.value)} placeholder={tr("第一批 / 01/06-07/06 …")} />
  </Field>
 
  <div style={{ borderTop: "1px solid #F0ECE1", paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
- <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>加入顾客 Add Customer（打名字，货物自动带出，不用手动填）</div>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>{tr("加入顾客 Add Customer（打名字，货物自动带出，不用手动填）")}</div>
  <div style={{ position: "relative" }}>
- <TextInput value={customerQuery} onChange={e => setCustomerQuery(e.target.value)} placeholder="打顾客名字搜索…" />
+ <TextInput value={customerQuery} onChange={e => setCustomerQuery(e.target.value)} placeholder={tr("打顾客名字搜索…")} />
  {candidates.length > 0 && (
  <div style={{ position: "absolute", top: "100%", left: 0, right: 0, background: "#fff", border: "1px solid #E2DDD0", borderRadius: 8, marginTop: 4, zIndex: 10, boxShadow: "0 4px 12px rgba(0,0,0,0.08)" }}>
  {candidates.map(c => (
@@ -5101,7 +5478,7 @@ function ShipmentBatchArea({ batches, saveBatch, deleteBatch, cases }) {
  )}
 
  <div style={{ borderTop: "1px solid #F0ECE1", paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
- <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>本批汇总 + 出货日期 Batch Totals + Ship Date（同样的货自动加总，日期自己填）</div>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>{tr("本批汇总 + 出货日期 Batch Totals + Ship Date（同样的货自动加总，日期自己填）")}</div>
  {order.length === 0 ? (
  <Empty text="No customers added yet." />
  ) : (
@@ -5109,10 +5486,10 @@ function ShipmentBatchArea({ batches, saveBatch, deleteBatch, cases }) {
  <table style={{ width: "100%", borderCollapse: "collapse" }}>
  <thead>
  <tr style={{ background: "#FBFAF6", textAlign: "left" }}>
- <th style={thStyle}>项目 Item</th>
- <th style={thStyle}>型号 Model</th>
- <th style={thStyle}>总数量 Total Qty</th>
- <th style={thStyle}>出货日期 Ship Date</th>
+ <th style={thStyle}>{tr("项目 Item")}</th>
+ <th style={thStyle}>{tr("型号 Model")}</th>
+ <th style={thStyle}>{tr("总数量 Total Qty")}</th>
+ <th style={thStyle}>{tr("出货日期 Ship Date")}</th>
  </tr>
  </thead>
  <tbody>
@@ -5139,7 +5516,7 @@ function ShipmentBatchArea({ batches, saveBatch, deleteBatch, cases }) {
 
  <div>
  <button onClick={() => { deleteBatch(openBatch.id); setOpenId(null); }} style={{ ...btnGhost, color: "#C24141", borderColor: "#F0C9C9" }}>
- <Trash2 size={13}/> 删除这个批次
+ <Trash2 size={13}/> {tr("删除这个批次")}
  </button>
  </div>
  </div>
@@ -5153,7 +5530,7 @@ function ShipmentBatchArea({ batches, saveBatch, deleteBatch, cases }) {
  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
  <div style={{ fontSize: 12, color: "#9AA2AD" }}>共 {batches.length} 个批次</div>
  <button onClick={() => { const b = emptyShipmentBatch(); saveBatch(b); setOpenId(b.id); }} style={btnPrimary}>
- <Plus size={14}/> 新增批次 New Batch
+ <Plus size={14}/> {tr("新增批次 New Batch")}
  </button>
  </div>
  {sorted.length === 0 ? (
@@ -5210,7 +5587,7 @@ function ItemPicker({ category, itemDirectory, model, onModelChange, onDescripti
  }}
  style={inputStyle}
  >
- <option value="">选择型号 Select…</option>
+ <option value="">{tr("选择型号 Select…")}</option>
  {options.map(it => <option key={it.id} value={it.id}>{it.name}{it.watt ? ` (${it.watt}W)` : ""}</option>)}
  </select>
  );
@@ -5221,10 +5598,10 @@ function AdminArea({ cases, view, setView, search, setSearch, agentFilter, setAg
  return (
  <div>
  <button onClick={() => setView({ screen: "list" })} style={{ ...btnGhost, marginBottom: 16 }}>
- <ArrowLeft size={14} /> 返回列表
+ <ArrowLeft size={14} /> {tr("返回列表 Back")}
  </button>
  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, margin: "0 0 16px", color: "#1B2430" }}>
- {view.isNew ? "新增 Case" : "编辑 Case"}
+ {tr(view.isNew ? "新增 Case" : "编辑 Case")}
  </h2>
  <CaseForm
  initial={view.editing}
@@ -5240,29 +5617,38 @@ function AdminArea({ cases, view, setView, search, setSearch, agentFilter, setAg
  );
  }
 
+ // Mirrors the Install Queue report's rule — 60% paid, or a loan with LO in hand, or a deposit
+ // on a job with no approval stage, or a management override. Keeping one rule in both places
+ // stops the tab and the report from showing different lists.
  const awaitingInstallList = cases
- .filter(c => paymentPercent(c) >= 60 && !installComplete(c) && !(c.cancellation && c.cancellation.isCancelled))
+ .filter(c => {
+ if (installComplete(c) || (c.cancellation && c.cancellation.isCancelled)) return false;
+ if (!needsInstallCrew(c)) return false;
+ if (c.payment.installOverride) return true;
+ if (skipsSedaTnb(c)) return paymentTotal(c) > 0;
+ return paymentPercent(c) >= 60 || (c.payment.isLoanCase && !!c.payment.loReceivedDate);
+ })
  .sort((a, b) => paymentPercent(b) - paymentPercent(a));
 
  return (
  <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
- <TabBtn active={view.screen === "list" || !view.screen} onClick={() => setView({ screen: "list" })} icon={FolderKanban} label="所有 Case All Cases" color="#0B2A4A" />
- <TabBtn active={view.screen === "awaiting"} onClick={() => setView({ screen: "awaiting" })} icon={Truck} label={`等待安装 Awaiting Install (${awaitingInstallList.length})`} color="#D98C3D" />
- <TabBtn active={view.screen === "batches"} onClick={() => setView({ screen: "batches" })} icon={Truck} label="出货批次 Shipment Batches" color="#2E7D6B" />
+ <TabBtn active={view.screen === "list" || !view.screen} onClick={() => setView({ screen: "list" })} icon={FolderKanban} label={tr("所有 Case All Cases")} color="#0B2A4A" />
+ <TabBtn active={view.screen === "awaiting"} onClick={() => setView({ screen: "awaiting" })} icon={Truck} label={`${tr("等待安装 Awaiting Install")} (${awaitingInstallList.length})`} color="#D98C3D" />
+ <TabBtn active={view.screen === "batches"} onClick={() => setView({ screen: "batches" })} icon={Truck} label={tr("出货批次 Shipment Batches")} color="#2E7D6B" />
  </div>
  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
- <TabBtn active={view.screen === "agents"} onClick={() => setView({ screen: "agents" })} icon={Users} label="Agent 管理" />
- <TabBtn active={view.screen === "items"} onClick={() => setView({ screen: "items" })} icon={FileCheck2} label="货物管理 Items" />
+ <TabBtn active={view.screen === "agents"} onClick={() => setView({ screen: "agents" })} icon={Users} label={tr("Agent 管理")} />
+ <TabBtn active={view.screen === "items"} onClick={() => setView({ screen: "items" })} icon={FileCheck2} label={tr("货物管理 Items")} />
  {canManageStaff(currentOperator) && (
- <TabBtn active={view.screen === "admins"} onClick={() => setView({ screen: "admins" })} icon={ShieldCheck} label="员工管理 Staff Accounts" />
+ <TabBtn active={view.screen === "admins"} onClick={() => setView({ screen: "admins" })} icon={ShieldCheck} label={tr("员工管理 Staff Accounts")} />
  )}
  </div>
  </div>
 
  {view.screen === "dashboard" ? (
- <Dashboard cases={cases} itemDirectory={itemDirectory} docLogs={docLogs} />
+ <Dashboard cases={cases} itemDirectory={itemDirectory} docLogs={docLogs} agentDirectory={agentDirectory} />
  ) : view.screen === "agents" ? (
  <AgentDirectoryArea agentDirectory={agentDirectory} saveAgent={saveAgent} deleteAgent={deleteAgent} />
  ) : view.screen === "items" ? (
@@ -5290,19 +5676,19 @@ function AdminArea({ cases, view, setView, search, setSearch, agentFilter, setAg
  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
  <div style={{ position: "relative", flex: 1, minWidth: 220 }}>
  <Search size={14} color="#9AA2AD" style={{ position: "absolute", left: 10, top: 10 }} />
- <TextInput value={search} onChange={e => setSearch(e.target.value)} placeholder="搜Case：客户姓名 / 电话 / Email / Agent…" style={{ paddingLeft: 30, width: "100%" }} />
+ <TextInput value={search} onChange={e => setSearch(e.target.value)} placeholder={tr("搜Case：客户姓名 / 电话 / Email / Agent…")} style={{ paddingLeft: 30, width: "100%" }} />
  </div>
- <Select value={agentFilter} onChange={e => setAgentFilter(e.target.value)} options={[{ value: "全部", label: "全部 All" }, ...agents]} style={{ width: 160 }} />
+ <Select value={agentFilter} onChange={e => setAgentFilter(e.target.value)} options={[{ value: "全部", label: tr("全部 All") }, ...agents]} style={{ width: 160 }} />
  <DateInputDMY value={listRangeStart} onChange={e => setListRangeStart(e.target.value)} style={{ width: 140 }} />
- <span style={{ color: "#B5AE9E", fontSize: 12 }}>至</span>
+ <span style={{ color: "#B5AE9E", fontSize: 12 }}>{tr("至")}</span>
  <DateInputDMY value={listRangeEnd} onChange={e => setListRangeEnd(e.target.value)} style={{ width: 140 }} />
  {(listRangeStart || listRangeEnd) && (
- <button onClick={() => { setListRangeStart(""); setListRangeEnd(""); }} style={{ ...btnGhost, padding: "8px 10px", fontSize: 12 }}>清除日期</button>
+ <button onClick={() => { setListRangeStart(""); setListRangeEnd(""); }} style={{ ...btnGhost, padding: "8px 10px", fontSize: 12 }}>{tr("清除日期")}</button>
  )}
  <button onClick={() => exportCasesToCsv(cases)} style={btnGhost}><FileDown size={14} /> Export CSV</button>
- <button onClick={openNew} style={btnPrimary}><Plus size={14} /> 新增 Case</button>
+ <button onClick={openNew} style={btnPrimary}><Plus size={14} /> {tr("新增 Case")}</button>
  </div>
- <div style={{ fontSize: 12, color: "#9AA2AD" }}>共 {filteredAdminList.length} 个 case（按定金日期排序，新定金在最上面；建档日期区间可留空表示全部；点击任意一行查看 / 编辑）</div>
+ <div style={{ fontSize: 12, color: "#9AA2AD" }}>{filteredAdminList.length} · {tr("按定金日期排序，新定金在最上面；建档日期区间可留空表示全部；点击任意一行查看 / 编辑")}</div>
  <AdminCaseTable cases={filteredAdminList} onEdit={openEdit} />
  </>
  )}
@@ -5314,7 +5700,7 @@ const thStyle = { padding: "5px 9px", fontSize: 10.5, fontWeight: 700, color: "#
 const tdStyle = { padding: "4px 9px", fontSize: 12, color: "#1B2430", verticalAlign: "middle" };
 
 function AdminCaseTable({ cases, onEdit }) {
- if (!cases.length) return <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 24 }}><Empty text="没有找到符合条件的 case" /></div>;
+ if (!cases.length) return <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, padding: 24 }}><Empty text={tr("没有找到符合条件的 case")} /></div>;
  return (
  <div style={{ background: "#fff", border: "1px solid #E9E4D8", borderRadius: 14, overflow: "hidden", overflowX: "auto" }}>
  <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
@@ -5342,24 +5728,26 @@ function AdminCaseTable({ cases, onEdit }) {
  <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 5 }}>
  {c.customerName || "Unnamed"}
  {c.billingName && c.billingName.trim() && c.billingName.trim() !== c.customerName.trim() && (
- <span title={`开票姓名 Billing Name: ${c.billingName}`} style={{ fontSize: 10, color: "#2C5F8A", background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 5, padding: "1px 5px", fontWeight: 700 }}>开票不同 Billing≠SEDA</span>
+ <span title={`开票姓名 Billing Name: ${c.billingName}`} style={{ fontSize: 10, color: "#2C5F8A", background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 5, padding: "1px 5px", fontWeight: 700 }}>{tr("开票不同 Billing≠SEDA")}</span>
  )}
  </div>
  <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 1 }}>
  <span style={{ fontSize: 10, color: "#9AA2AD" }}>{c.customerPhone || "-"}</span>
  <Badge color={PACKAGE_TYPE_COLORS[c.pkg.packageType] || "#9AA2AD"}>{c.pkg.packageType}</Badge>
- {c.pkg.caseType && c.pkg.caseType !== "New Installation" && <Badge color={CASE_TYPE_COLORS[c.pkg.caseType] || "#9AA2AD"}>{CASE_TYPE_LABELS[c.pkg.caseType] || c.pkg.caseType}</Badge>}
- {c.payment.isLoanCase && <Badge color="#2C5F8A">贷款 LOAN</Badge>}
+ {c.pkg.caseType && c.pkg.caseType !== "New Installation" && c.pkg.packageType === "Solar Package" && <Badge color={CASE_TYPE_COLORS[c.pkg.caseType] || "#9AA2AD"}>{tr(CASE_TYPE_LABELS[c.pkg.caseType] || c.pkg.caseType)}</Badge>}
+ {isEV(c) && c.pkg.evJobType && <Badge color={EV_JOB_COLORS[c.pkg.evJobType] || "#9AA2AD"}>{tr(EV_JOB_LABELS[c.pkg.evJobType] || c.pkg.evJobType)}</Badge>}
+ {c.payment.isLoanCase && <Badge color="#2C5F8A">{tr("贷款 LOAN")}</Badge>}
+ {c.payment.installOverride && <Badge color="#C24141">{tr("⚡ 特批 SPECIAL")}</Badge>}
  </div>
  </td>
  <td style={tdStyle}>{agentDisplay(c)}</td>
- <td style={tdStyle}>{c.pkg.propertyType}{c.pkg.packageType === "Solar Package" ? ` - ${c.pkg.systemType}` : ` - ${c.pkg.packageType === "EV Charger Package" ? "EV" : "Other"}`}</td>
+ <td style={tdStyle}>{propLabel(c.pkg.propertyType)}{c.pkg.packageType === "Solar Package" ? ` - ${c.pkg.systemType}` : ` - ${c.pkg.packageType === "EV Charger Package" ? "EV" : "Other"}`}</td>
  <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace", color: dep ? "#1B2430" : "#B5AE9E" }}>
  {dep ? monthLabel(monthKey(dep)) : "No Deposit"}
  </td>
  <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace" }}>{paymentPercent(c)}%</td>
  <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace" }}>{fmtMoney(c.pkg.sellingPrice)}</td>
- <td style={tdStyle}><Badge color={stage.color}>{stage.label} - {stage.en}</Badge></td>
+ <td style={tdStyle}><Badge color={stage.color}>{CURRENT_LANG === "en" ? stage.en : CURRENT_LANG === "zh" ? tr(stage.label) : `${stage.label} - ${stage.en}`}</Badge></td>
  </tr>
  );
  })}
@@ -5390,7 +5778,7 @@ function AgentArea({ agents, simAgent, setSimAgent, agentCases, view, setView, l
  return (
  <div>
  <button onClick={() => setView({ screen: "agentList" })} style={{ ...btnGhost, marginBottom: 16 }}>
- <ArrowLeft size={14} /> 返回我的 Case
+ <ArrowLeft size={14} /> {tr("返回我的 Case")}
  </button>
  <div style={{ marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, margin: 0, color: "#1B2430" }}>{c.customerName || "未命名客户"}</h2>
@@ -5415,7 +5803,7 @@ function AgentArea({ agents, simAgent, setSimAgent, agentCases, view, setView, l
  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
  {agentCases.length ? agentCases.map(c => (
  <CaseCard key={c.id} c={c} onClick={() => setView({ screen: "agentDetail", caseId: c.id })} />
- )) : <Empty text="这位Agent目前没有任何case" />}
+ )) : <Empty text={tr("这位Agent目前没有任何case")} />}
  </div>
  </div>
  );
