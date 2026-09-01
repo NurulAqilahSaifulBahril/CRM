@@ -42,7 +42,14 @@ function setUserDataDir(dir) { userDataDir = dir; }
 function currentPgConfig() {
   const bundled = loadEnvFile(path.join(ROOT, '.env.local')) || {};
   const override = userDataDir ? loadEnvFile(path.join(userDataDir, '.env.local')) : null;
-  const merged = { ...bundled, ...(override || {}) };
+  // Cloud hosts inject config as real environment variables and never have a .env.local (it is
+  // gitignored, so it is never deployed). process.env is therefore the base layer; a file, where
+  // one exists, still wins, leaving desktop token rotation via the userData copy exactly as before.
+  const fromEnv = {};
+  for (const key of ['PG_PROXY_URL', 'PG_PROXY_DB', 'PG_PROXY_TOKEN']) {
+    if (process.env[key]) fromEnv[key] = process.env[key];
+  }
+  const merged = { ...fromEnv, ...bundled, ...(override || {}) };
   return {
     url: merged.PG_PROXY_URL,
     db: merged.PG_PROXY_DB,
