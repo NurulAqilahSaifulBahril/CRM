@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const fs = require('fs');
 const net = require('net');
@@ -81,6 +81,7 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
@@ -114,16 +115,66 @@ function buildMenu(userDataDir) {
 // Fully automatic and silent, matching how the Installation System's updater installs on the
 // user's next restart with no wizard: download in the background, then let electron-updater's
 // default autoInstallOnAppQuit apply it the next time the app closes. No prompts either way.
+//
+// Silent used to mean invisible: the events below only reached the terminal, which nobody running
+// the installed app ever sees. So the state is mirrored into this object and pushed to the window,
+// where the dashboard shows the running version and whether an update is waiting. Nothing about
+// the install behaviour changed — this only makes it visible, plus two optional buttons.
 autoUpdater.autoDownload = true;
-autoUpdater.on('error', (e) => console.error('Auto-update error:', e && e.message));
+
+const updateState = {
+  version: app.getVersion(),
+  // 'disabled' until the first check, because an unpackaged dev run has no feed to check against.
+  status: 'idle',   // idle | checking | current | downloading | downloaded | error | disabled
+  newVersion: null,
+  percent: 0,
+  error: null,
+  checkedAt: null,  // ISO string, stamped when a check reaches a conclusion
+};
+
+function setUpdateState(patch) {
+  Object.assign(updateState, patch);
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('updater:state', updateState);
+  }
+}
+const stamp = () => new Date().toISOString();
+
+autoUpdater.on('checking-for-update', () => setUpdateState({ status: 'checking', error: null }));
+autoUpdater.on('update-not-available', () => setUpdateState({ status: 'current', newVersion: null, checkedAt: stamp() }));
+// autoDownload means "available" is immediately followed by the download starting, so there is no
+// separate "available" state worth showing — it would flash past.
+autoUpdater.on('update-available', (info) => setUpdateState({ status: 'downloading', newVersion: info.version, percent: 0, checkedAt: stamp() }));
+autoUpdater.on('download-progress', (p) => setUpdateState({ status: 'downloading', percent: Math.round(p.percent || 0) }));
 autoUpdater.on('update-downloaded', (info) => {
   console.log(`Update ${info.version} downloaded — will install next time the app restarts.`);
+  setUpdateState({ status: 'downloaded', newVersion: info.version, percent: 100, checkedAt: stamp() });
+});
+autoUpdater.on('error', (e) => {
+  console.error('Auto-update error:', e && e.message);
+  setUpdateState({ status: 'error', error: (e && e.message) || String(e), checkedAt: stamp() });
 });
 
 function checkForUpdates() {
-  if (!app.isPackaged) return; // dev runs have no update feed to check
-  autoUpdater.checkForUpdates().catch((e) => console.error('Update check failed:', e && e.message));
+  if (!app.isPackaged) return setUpdateState({ status: 'disabled' }); // dev runs have no update feed to check
+  setUpdateState({ status: 'checking', error: null });
+  autoUpdater.checkForUpdates().catch((e) => {
+    console.error('Update check failed:', e && e.message);
+    setUpdateState({ status: 'error', error: (e && e.message) || String(e), checkedAt: stamp() });
+  });
 }
+
+// A mounting dashboard needs the current state, not just future changes — events already fired
+// before the page loaded would otherwise leave it stuck on "not checked yet".
+ipcMain.handle('updater:get-state', () => updateState);
+ipcMain.handle('updater:check', () => { checkForUpdates(); return updateState; });
+// Same silent install autoInstallOnAppQuit would do on the next quit, just now instead of later,
+// and relaunching afterwards so the user lands back where they were.
+ipcMain.handle('updater:restart', () => {
+  if (updateState.status !== 'downloaded') return false;
+  setImmediate(() => autoUpdater.quitAndInstall(true, true));
+  return true;
+});
 
 async function boot() {
   const userDataDir = seedUserConfig();

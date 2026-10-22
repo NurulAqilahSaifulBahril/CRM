@@ -3,7 +3,7 @@
   "version": "1.0.4",
   "private": true,
   "scripts": {
-    "start": "node serve.cjs case-hub-api.html",
+    "start": "node serve.cjs case-hub-api.html 8935",
     "desktop": "electron .",
     "dist:win": "node scripts/build-installer.cjs",
     "pack:win": "node scripts/build-installer.cjs --dir",

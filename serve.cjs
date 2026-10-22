@@ -91,7 +91,7 @@ async function runSql(cfg, sql, params) {
   throw lastErr;
 }
 
-const BUCKETS = new Set(['cases', 'agentDirectory', 'itemDirectory', 'adminDirectory', 'shipmentBatches', 'docLogs']);
+const BUCKETS = new Set(['cases', 'agentDirectory', 'itemDirectory', 'adminDirectory', 'shipmentBatches', 'docLogs', 'deliveryOrders']);
 
 function readJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -179,6 +179,18 @@ async function handlePgDelete(req, res) {
   }
 }
 
+// The desktop app gets its version from Electron itself. A browser or cloud host has no such
+// channel, so the dashboard asks the server which build it is serving. Read once — the file cannot
+// change under a running process without a redeploy.
+let cachedVersion;
+function appVersion() {
+  if (cachedVersion === undefined) {
+    try { cachedVersion = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version || null; }
+    catch (e) { cachedVersion = null; }
+  }
+  return cachedVersion;
+}
+
 const TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -219,15 +231,16 @@ function createServer({ entry }) {
     if (req.method === 'POST' && url === '/api/pg/read') return handlePgRead(req, res);
     if (req.method === 'POST' && url === '/api/pg/write') return handlePgWrite(req, res);
     if (req.method === 'POST' && url === '/api/pg/delete') return handlePgDelete(req, res);
+    if (req.method === 'GET' && url === '/api/version') return sendJson(res, 200, { version: appVersion() });
     serveStatic(entry, req, res);
   });
 }
 
-function startServer({ entry, port }) {
+function startServer({ entry, port, host = '127.0.0.1' }) {
   return new Promise((resolve, reject) => {
     const server = createServer({ entry });
     server.once('error', reject);
-    server.listen(port, () => {
+    server.listen(port, host, () => {
       server.off('error', reject);
       resolve(server);
     });
@@ -239,9 +252,13 @@ module.exports = { startServer, createServer, setUserDataDir, currentPgConfig };
 if (require.main === module) {
   // CLI usage for local dev / the browser preview tool: node serve.cjs <entry> <port>
   const ENTRY = process.argv[2] || process.env.ENTRY || 'index.html.html';
-  const PORT = Number(process.argv[3] || process.env.PORT) || 8934;
-  startServer({ entry: ENTRY, port: PORT }).then(() => {
+  // A cloud host assigns PORT and routes traffic in from outside, so its PORT wins over the one in
+  // the start script and the server listens on every interface. Anywhere else it stays on loopback:
+  // this server holds full SQL access to the database and must not be reachable from the LAN.
+  const PORT = Number(process.env.PORT || process.argv[3]) || 8935;
+  const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
+  startServer({ entry: ENTRY, port: PORT, host: HOST }).then(() => {
     const cfg = currentPgConfig();
-    console.log(`CRM running at http://localhost:${PORT}/ (entry: ${ENTRY}, pg proxy: ${cfg.configured ? 'configured' : 'NOT configured'})`);
+    console.log(`CRM running at http://${HOST}:${PORT}/ (entry: ${ENTRY}, pg proxy: ${cfg.configured ? 'configured' : 'NOT configured'})`);
   });
 }
