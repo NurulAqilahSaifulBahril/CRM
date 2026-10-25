@@ -225,12 +225,132 @@ function serveStatic(entry, req, res) {
   });
 }
 
+// ---------- Staff sign-in ----------
+// The data routes below used to answer anyone who could reach the server. Staff now sign in here:
+// the password is checked against the adminDirectory rows on the server, and the browser gets an
+// HttpOnly session cookie. Passwords never leave the server; the browser only sees names and the
+// operator fields the CRM already needs.
+const crypto = require('crypto');
+const SESSION_COOKIE = 'crm_session';
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const sessions = new Map(); // token -> { account, expires }
+const failedLogins = new Map(); // lower-cased name -> { count, since }
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+function currentSession(req) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (!token) return null;
+  const sess = sessions.get(token);
+  if (!sess) return null;
+  if (sess.expires < Date.now()) { sessions.delete(token); return null; }
+  return sess;
+}
+function cookieSecureSuffix(req) {
+  return req.headers['x-forwarded-proto'] === 'https' ? '; Secure' : '';
+}
+function setSessionCookie(req, res, token) {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}${cookieSecureSuffix(req)}`);
+}
+function clearSessionCookie(req, res) {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${cookieSecureSuffix(req)}`);
+}
+// Reads the staff list straight from the database, so the browser can't skip the check.
+async function loadStaffAccounts() {
+  const cfg = currentPgConfig();
+  if (!cfg.configured) throw new Error('PG proxy not configured on server');
+  const out = await runSql(cfg, 'select data from case_hub_records where bucket = $1', ['adminDirectory']);
+  return (out.rows || [])
+    .map(row => (typeof row.data === 'string' ? JSON.parse(row.data) : row.data))
+    .filter(a => a && a.name);
+}
+function samePassword(given, stored) {
+  const a = Buffer.from(String(given || ''));
+  const b = Buffer.from(String(stored || ''));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function operatorFields(a) {
+  return { id: a.id, name: a.name, canManageSettings: !!a.canManageSettings };
+}
+
+async function handleStaffNames(req, res) {
+  try {
+    const accounts = await loadStaffAccounts();
+    sendJson(res, 200, { accounts: accounts.map(operatorFields) });
+  } catch (e) {
+    console.error('staff list failed', e.message);
+    sendJson(res, 502, { error: e.message });
+  }
+}
+
+async function handleLogin(req, res) {
+  let payload;
+  try { payload = await readJsonBody(req); } catch (e) { return sendJson(res, 400, { error: 'Invalid JSON body' }); }
+  const name = String((payload && payload.name) || '');
+  const password = String((payload && payload.password) || '');
+  const key = name.toLowerCase();
+  const failed = failedLogins.get(key);
+  if (failed && Date.now() - failed.since < LOGIN_WINDOW_MS && failed.count >= LOGIN_MAX_FAILURES) {
+    return sendJson(res, 429, { error: 'Too many failed attempts. Try again in a few minutes.' });
+  }
+  try {
+    const accounts = await loadStaffAccounts();
+    const match = accounts.find(a => a.name === name && samePassword(password, a.password));
+    if (!match) {
+      const now = Date.now();
+      const cur = failedLogins.get(key);
+      failedLogins.set(key, cur && now - cur.since < LOGIN_WINDOW_MS ? { count: cur.count + 1, since: cur.since } : { count: 1, since: now });
+      return sendJson(res, 401, { error: 'Name or password incorrect.' });
+    }
+    failedLogins.delete(key);
+    const token = crypto.randomBytes(32).toString('hex');
+    const account = operatorFields(match);
+    sessions.set(token, { account, expires: Date.now() + SESSION_TTL_MS });
+    setSessionCookie(req, res, token);
+    sendJson(res, 200, { account });
+  } catch (e) {
+    console.error('login failed', e.message);
+    sendJson(res, 502, { error: e.message });
+  }
+}
+
+function handleMe(req, res) {
+  const sess = currentSession(req);
+  if (!sess) return sendJson(res, 401, { error: 'Not signed in' });
+  sendJson(res, 200, { account: sess.account });
+}
+
+function handleLogout(req, res) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  if (token) sessions.delete(token);
+  clearSessionCookie(req, res);
+  sendJson(res, 200, { ok: true });
+}
+
+// Every /api/pg/* route needs a staff session. Anything else is refused before it reaches SQL.
+function requireStaff(req, res, handler) {
+  if (!currentSession(req)) return sendJson(res, 401, { error: 'Sign in required' });
+  return handler(req, res);
+}
+
 function createServer({ entry }) {
   return http.createServer((req, res) => {
     const url = req.url.split('?')[0];
-    if (req.method === 'POST' && url === '/api/pg/read') return handlePgRead(req, res);
-    if (req.method === 'POST' && url === '/api/pg/write') return handlePgWrite(req, res);
-    if (req.method === 'POST' && url === '/api/pg/delete') return handlePgDelete(req, res);
+    if (req.method === 'POST' && url === '/api/auth/staff-names') return handleStaffNames(req, res);
+    if (req.method === 'POST' && url === '/api/auth/login') return handleLogin(req, res);
+    if (req.method === 'POST' && url === '/api/auth/logout') return handleLogout(req, res);
+    if (req.method === 'GET' && url === '/api/auth/me') return handleMe(req, res);
+    if (req.method === 'POST' && url === '/api/pg/read') return requireStaff(req, res, handlePgRead);
+    if (req.method === 'POST' && url === '/api/pg/write') return requireStaff(req, res, handlePgWrite);
+    if (req.method === 'POST' && url === '/api/pg/delete') return requireStaff(req, res, handlePgDelete);
     if (req.method === 'GET' && url === '/api/version') return sendJson(res, 200, { version: appVersion() });
     serveStatic(entry, req, res);
   });

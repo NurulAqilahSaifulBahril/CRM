@@ -82,6 +82,9 @@ async function pgCall(route, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  // 401 means the staff session has ended. Reload to the sign-in page; the portals have no staff login.
+  const portal = window.location.hash === "#agent" || window.location.hash === "#referral" || /^#ref=/.test(window.location.hash);
+  if (res.status === 401 && !portal) window.location.reload();
   const json = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
   return json;
@@ -2210,6 +2213,16 @@ async function loadAdminDirectory() {
 }
 async function saveAdminDirectory(list) {
  try { await storage.set("adminDirectory", JSON.stringify(list), true); } catch (e) { console.error(e); }
+}
+
+// Staff names only (no passwords) for the sign-in picker, before anyone is signed in.
+async function loadStaffNames() {
+ try {
+ const res = await fetch("/api/auth/staff-names", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+ if (!res.ok) return [];
+ const json = await res.json();
+ return (json.accounts || []).map(normalizeAdminAccount);
+ } catch { return []; }
 }
 
 const MALAYSIA_STATES = ["Johor", "Kedah", "Kelantan", "Melaka", "Negeri Sembilan", "Pahang", "Perak", "Perlis", "Pulau Pinang", "Sabah", "Sarawak", "Selangor", "Terengganu", "Kuala Lumpur", "Labuan", "Putrajaya"];
@@ -6062,6 +6075,9 @@ function CaseStorageMigrationTool({ casesStorageMode, caseCount }) {
 }
 function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdminAccount }) {
  const [editing, setEditing] = useState(null);
+ // Staff Accounts is already limited to operators with canManageSettings (see AdminArea), so the
+ // admin can read every password here instead of opening each account one by one.
+ const [showPasswords, setShowPasswords] = useState(false);
  if (editing) {
  return (
  <div>
@@ -6081,7 +6097,10 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  return (
  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+ <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
  <div style={{ fontSize: 12, color: "#9AA2AD" }}> {adminDirectory.length} — Case</div>
+ <button onClick={() => setShowPasswords(s => !s)} style={btnGhost}>{showPasswords ? "Hide passwords" : "Show passwords"}</button>
+ </div>
  <button onClick={() => setEditing({ isNew: true, account: emptyAdminAccount() })} style={btnPrimary}><Plus size={14}/> </button>
  </div>
  {adminDirectory.length === 0 ? (
@@ -6096,6 +6115,7 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  <th style={thStyle}> Name</th>
  <th style={thStyle}>Email</th>
  <th style={thStyle}> Phone</th>
+ <th style={thStyle}>Password</th>
  <th style={thStyle}></th>
  </tr>
  </thead>
@@ -6107,6 +6127,7 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  <td style={{ ...tdStyle, fontWeight: 600 }}>{a.name}</td>
  <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>{a.email || "-"}</td>
  <td style={tdStyle}>{a.phone || "-"}</td>
+ <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>{showPasswords ? (a.password || "-") : "••••••"}</td>
  <td style={tdStyle}>{a.note || "-"}</td>
  </tr>
  ))}
@@ -7443,10 +7464,26 @@ function SignInPage({ adminDirectory, onSignIn, saveAdminAccount }) {
  const [firstPassword, setFirstPassword] = useState("");
  const noAccounts = adminDirectory.length === 0;
 
- const submit = () => {
- const match = adminDirectory.find(a => a.name === name && a.password === password);
- if (match) onSignIn(match);
- else setError("Name or password incorrect.");
+ const submit = async () => {
+ try {
+ const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, password }) });
+ if (res.ok) {
+ const json = await res.json();
+ onSignIn(normalizeAdminAccount(json.account));
+ return;
+ }
+ if (res.status === 401) { setError("Name or password incorrect."); return; }
+ if (res.status === 429) { setError("Too many failed attempts. Try again in a few minutes."); return; }
+ if (res.status >= 500) {
+ // The server answered but could not check the password (usually the database is unreachable).
+ const json = await res.json().catch(() => ({}));
+ setError(`Sign-in is unavailable right now: ${json.error || "the server could not reach the database"}. Try again shortly, or ask IT to check the server.`);
+ return;
+ }
+ setError(`Sign-in failed (HTTP ${res.status}). Try again.`);
+ } catch {
+ setError("Could not reach the server. Check your connection and try again.");
+ }
  };
  const createFirst = () => {
  // The very first account has to be able to manage the others.
@@ -7539,17 +7576,31 @@ function App() {
  try { const raw = localStorage.getItem(OPERATOR_KEY); return raw ? JSON.parse(raw) : null; }
  catch { return null; }
  });
- useEffect(() => { if (!isPortal) loadAdminDirectory().then(setAdminDirectory); }, []);
+ useEffect(() => {
+ if (isPortal) return;
+ (async () => {
+ const me = await fetch("/api/auth/me").then(r => (r.ok ? r.json() : null)).catch(() => null);
+ if (me) {
+ setAdminDirectory(await loadAdminDirectory());
+ } else {
+ try { localStorage.removeItem(OPERATOR_KEY); } catch (e) { /* private mode */ }
+ setOperator(null);
+ setAdminDirectory(await loadStaffNames());
+ }
+ })();
+ }, []);
 
  const signIn = useCallback((account) => {
  const op = operatorFromAccount(account);
  try { localStorage.setItem(OPERATOR_KEY, JSON.stringify(op)); } catch (e) { /* private mode */ }
  setOperator(op);
+ loadAdminDirectory().then(setAdminDirectory);
  }, []);
  const signOut = useCallback(() => {
  try { localStorage.removeItem(OPERATOR_KEY); sessionStorage.removeItem("currentOperator"); } catch (e) { /* private mode */ }
  setOperator(null);
- loadAdminDirectory().then(setAdminDirectory);
+ fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+ loadStaffNames().then(setAdminDirectory);
  }, []);
  const saveFirstAccount = useCallback((account) => {
  const next = [...(adminDirectory || []), account];
