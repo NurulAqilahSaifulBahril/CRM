@@ -5609,7 +5609,11 @@ function CRMApp({ initialOperator, onSignOut }) {
  setPendingLoginAction(() => action);
  }, [currentOperator]);
 
+ // Cases point at their Agent by name (and code), not by id, so renaming an Agent has to carry the
+ // new name onto every case already filed under the old one — otherwise those cases lose the link,
+ // and lookups like the Agent's phone number for "Send → Agent" on WhatsApp silently come up empty.
  const saveAgent = useCallback((agent) => {
+ const prevAgent = (agentDirectory || []).find(a => a.id === agent.id);
  setAgentDirectory(prev => {
  const list = prev || [];
  const exists = list.some(a => a.id === agent.id);
@@ -5617,7 +5621,21 @@ function CRMApp({ initialOperator, onSignOut }) {
  saveAgentDirectory(next);
  return next;
  });
- }, []);
+ if (!prevAgent || !prevAgent.name || (prevAgent.name === agent.name && prevAgent.code === agent.code)) return;
+ const renamed = (cases || []).filter(c => c.agentName === prevAgent.name).map(c => ({
+ ...c,
+ agentName: agent.name,
+ // Only follow the code change where the case still carries the old code — a case someone
+ // filed with a different code on purpose keeps it.
+ ...(c.agentCode === prevAgent.code ? { agentCode: agent.code } : {}),
+ }));
+ if (renamed.length === 0) return;
+ const byId = new Map(renamed.map(c => [c.id, c]));
+ setCases(prev => (prev || []).map(c => byId.get(c.id) || c));
+ // One at a time, stopping at the first failure, so a dropped connection raises one alert rather
+ // than one per case.
+ (async () => { for (const c of renamed) { if (!(await saveCasePerDoc(c))) break; } })();
+ }, [agentDirectory, cases]);
  const deleteAgent = useCallback((id) => {
  setAgentDirectory(prev => {
  const next = (prev || []).filter(a => a.id !== id);
