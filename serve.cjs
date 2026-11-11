@@ -376,7 +376,7 @@ if (require.main === module) {
   // the start script and the server listens on every interface. Anywhere else it stays on loopback:
   // this server holds full SQL access to the database and must not be reachable from the LAN.
   const PORT = Number(process.env.PORT || process.argv[3]) || 8935;
-  const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
+  const HOST = process.env.HOST || '0.0.0.0';
   startServer({ entry: ENTRY, port: PORT, host: HOST }).then(() => {
     const cfg = currentPgConfig();
     console.log(`CRM running at http://${HOST}:${PORT}/ (entry: ${ENTRY}, pg proxy: ${cfg.configured ? 'configured' : 'NOT configured'})`);

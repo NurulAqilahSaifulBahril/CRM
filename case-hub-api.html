@@ -389,13 +389,15 @@ function emptyCase() {
  // Installation tab date (the customer may not actually accept this slot).
  confirmGoodsSchedule: "",
  },
- payment: { records: [], note: "", isLoanCase: false, loReceivedDate: "", loanBank: "", loanApprovedAmount: "", loanRefNo: "",
+ payment: { records: [], note: "", salesApprovalDate: "", salesApprovalBy: "", isLoanCase: false, loReceivedDate: "", loanBank: "", loanApprovedAmount: "", loanRefNo: "",
  // Management can green-light an install before the usual 60% is collected. It bypasses a
  // payment control, so who approved it and why is recorded alongside the flag itself.
  installOverride: false, overrideApprovedBy: "", overrideDate: "", overrideReason: "" },
  // milestoneDate records when the post-installation milestone was updated with SEDA — the step
  // that follows the physical install, tracked separately so it doesn't get forgotten.
- seda: { submitDate: "", approvalDate: "", certificationNo: "", milestoneDate: "", eotDate: "", note: "" },
+ seda: { submitDate: "", approvalDate: "", certificationNo: "", milestoneDate: "", eotDate: "", note: "",
+ // Application fee can change 2-3 times, so each charge is its own entry.
+ applicationFees: [] },
  install: {
  deliveryDate: "",
  panel: { applicable: true, date: "", siteSupervisor: "", installer: "", wiringTeam: "" },
@@ -411,7 +413,7 @@ function emptyCase() {
  pendingJobs: [],
  note: "",
  },
- tnb: { applyDate: "", welcomeDate: "", tnbAccount: "", branch: "", note: "", reminders: [] },
+ tnb: { applyDate: "", welcomeDate: "", tnbAccount: "", branch: "", note: "", reminders: [], stampDutyRepayDate: "" },
  om: { records: [], note: "" },
  insurance: {
  policyNo: "",
@@ -423,7 +425,7 @@ function emptyCase() {
  isCancelled: false, cancelDate: "",
  collectedAmount: "", collectedMethod: "",
  refundAmount: "", refundReason: "", refundMethod: "",
- companyRefundDate: "",
+ companyRefundDate: "", approvedBy: "",
  bankName: "", bankAccountNo: "", bankAccountHolder: "",
  note: "",
  },
@@ -463,6 +465,11 @@ function paymentPercent(c) {
 function firstPaymentDate(c) {
  const dates = c.payment.records.map(r => r.date).filter(Boolean).sort();
  return dates[0] || null;
+}
+// The month a case counts as a "deal" in sales/deposit reports. Normally the first payment date,
+// but a case that got Special Approval to count in an earlier month carries that date instead.
+function salesDateOf(c) {
+ return c.payment.salesApprovalDate || firstPaymentDate(c);
 }
 function lastPaymentDate(c) {
  const dates = c.payment.records.map(r => r.date).filter(Boolean).sort();
@@ -999,29 +1006,84 @@ function buildAgentFullListReportDoc(cases) {
  return { title: `Agent Full Case List ${agentName} ${today}`, html };
 }
 
+function inverterSpecText(c) {
+ const all = [];
+ if (c.pkg.inverterModel) all.push(c.pkg.inverterModel);
+ (c.pkg.inverterEntries || []).forEach(e => { if (e.model) all.push(`${e.model}${e.qty > 1 ? ` x${e.qty}` : ""}`); });
+ return all.length ? all.join("<br/>") : "-";
+}
+function otherItemsText(c) {
+ const o = (c.pkg.otherEntries || []).filter(e => e.name).map(e => `${e.name}${e.qty > 1 ? ` x${e.qty}` : ""}`);
+ return o.length ? o.join("<br/>") : "-";
+}
+function districtAreaText(c) {
+ return [c.pkg.region, (c.pkg.district || "").trim()].filter(Boolean).join(" - ") || "-";
+}
 function buildDepositReportDoc(startDate, endDate, cases) {
  const list = cases.filter(c => {
- if (!inRange(firstPaymentDate(c), startDate, endDate)) return false;
+ if (!inRange(salesDateOf(c), startDate, endDate)) return false;
  const cancelled = c.cancellation && c.cancellation.isCancelled;
  if (cancelled) return true; // cancelled cases always show here (with the cancel date), regardless of how far payment got
  // If this case's payment also crossed 60%/80%/100% within this same date range, it belongs
  // to that threshold report instead — keeps a case from double-counting in both reports.
  return !highestThresholdCrossedInRange(c, startDate, endDate);
  });
- const rows = list.map(c => {
- const first = c.payment.records.slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""))[0];
+ const firstOf = (c) => c.payment.records.slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""))[0];
+ const panelOf = (c) => c.pkg.packageType === "Solar Package" && (c.pkg.panelCount || c.pkg.panelSizeW)
+ ? `${c.pkg.panelCount || "-"} x ${c.pkg.panelSizeW || "-"}W` : "-";
+ const otherOf = (c) => {
+ const o = (c.pkg.otherEntries || []).filter(e => e.name).map(e => `${e.name}${e.qty > 1 ? ` x${e.qty}` : ""}`);
+ return o.length ? o.join("<br/>") : "-";
+ };
+ // Grouped by Agent (A-Z) so each agent's cases sit together and can be counted at a glance.
+ const agentKey = (c) => (agentDisplay(c) || "").toString().toUpperCase();
+ const sorted = list.slice().sort((a, b) => agentKey(a).localeCompare(agentKey(b)) || (salesDateOf(a) || "").localeCompare(salesDateOf(b) || ""));
+ const agents = [];
+ sorted.forEach(c => {
+ const k = agentKey(c) || "NO AGENT";
+ let g = agents.find(x => x.key === k);
+ if (!g) { g = { key: k, items: [] }; agents.push(g); }
+ g.items.push(c);
+ });
+ const COLS = 9;
+ const rows = agents.map(g => {
+ const sumAmt = g.items.reduce((t, c) => t + (Number((firstOf(c) || {}).amount) || 0), 0);
+ const head = `<tr style="background:#E8EEF5;"><td colspan="${COLS}" style="border:1px solid #ccc;padding:7px 9px;font-size:12.5px;"><b>${g.key}</b> &nbsp;—&nbsp; ${g.items.length} case${g.items.length > 1 ? "s" : ""} &nbsp;|&nbsp; Deposit ${fmtMoney(sumAmt)}</td></tr>`;
+ const body = g.items.map(c => {
+ const first = firstOf(c);
  const cancelled = c.cancellation && c.cancellation.isCancelled;
- const status = cancelled ? `Cancelled ${c.cancellation.cancelDate ? fmtDate(c.cancellation.cancelDate) : ""}` : "-";
- return trHtml([c.customerName || "-", agentDisplay(c), c.pkg.propertyType, first ? fmtDate(first.date) : "-", fmtMoney(first ? first.amount : 0), fmtMoney(c.pkg.sellingPrice), status], cancelled ? `background:#FBEAEA;color:#8B3A3A;` : "");
+ const status = [
+ cancelled ? `Cancelled ${c.cancellation.cancelDate ? fmtDate(c.cancellation.cancelDate) : ""}` : "",
+ c.payment.salesApprovalDate ? `Special approval: counted in ${monthLabel(monthKey(c.payment.salesApprovalDate))}` : "",
+ ].filter(Boolean).join("<br/>") || "-";
+ return trHtml([c.customerName || "-", c.pkg.propertyType || "NOT SET", first ? fmtDate(first.date) : "-", fmtMoney(first ? first.amount : 0),
+ panelOf(c), inverterSpecText(c), otherOf(c), fmtMoney(c.pkg.sellingPrice), status], cancelled ? `background:#FBEAEA;color:#8B3A3A;` : "");
  }).join("");
- const total = list.reduce((s, c) => {
- const first = c.payment.records.slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""))[0];
- return s + (Number(first ? first.amount : 0) || 0);
- }, 0);
+ return head + body;
+ }).join("");
+ const total = list.reduce((s, c) => s + (Number((firstOf(c) || {}).amount) || 0), 0);
  const cancelledCount = list.filter(c => c.cancellation && c.cancellation.isCancelled).length;
+ // Monthly summary (by sales month, cancelled cases left out): how many cases, how many Residential,
+ // and how many of each other property type.
+ const live = list.filter(c => !(c.cancellation && c.cancellation.isCancelled));
+ const months = [...new Set(live.map(c => monthKey(salesDateOf(c))))].sort();
+ const summaryRows = months.map(mk => {
+ const m = live.filter(c => monthKey(salesDateOf(c)) === mk);
+ const res = m.filter(c => c.pkg.propertyType === "Residential").length;
+ const other = m.filter(c => c.pkg.propertyType !== "Residential");
+ const breakdown = PROPERTY_TYPES.filter(p => p.v !== "Residential")
+ .map(p => ({ l: p.en, n: other.filter(c => c.pkg.propertyType === p.v).length })).filter(x => x.n)
+ .map(x => `${x.l} ${x.n}`);
+ const notSet = other.filter(c => !PROPERTY_TYPES.some(p => p.v === c.pkg.propertyType)).length;
+ if (notSet) breakdown.push(`NOT SET ${notSet}`);
+ return trHtml([`<b>${monthLabel(mk)}</b>`, m.length, res, other.length, breakdown.join(", ") || "-"]);
+ }).join("");
  const html = `${buildLetterheadHtml()}<h1 style="font-size:18px;margin:14px 0 6px;">Deposit Report &nbsp;—&nbsp; ${dateRangeLabel(startDate, endDate)}</h1>
- ${styledTable(["Customer", "Agent", "Property", "Deposit Date", "Deposit Amount", "Price", "Status"], rows || trHtml(["No cases","","","","","",""]))}
- <div style="margin-top:14px;font-size:13px;"> case ${list.length} &nbsp;|&nbsp; ${fmtMoney(total)}${cancelledCount ? ` &nbsp;|&nbsp; ${cancelledCount} ` :""}</div>`;
+ <div style="font-size:11px;color:#666;margin-bottom:6px;">*Grouped by Agent. A case with a Special Approval (sales month) date is counted in that date's month.</div>
+ ${styledTable(["Customer", "Property", "Deposit Date", "Deposit Amount", "Solar Panel", "Inverter", "Other Items", "Price", "Status"], rows || trHtml(["No cases","","","","","","","",""]))}
+ <div style="margin-top:14px;font-size:13px;">Total cases: ${list.length} &nbsp;|&nbsp; Total deposit: ${fmtMoney(total)}${cancelledCount ? ` &nbsp;|&nbsp; Cancelled: ${cancelledCount}` : ""}</div>
+ <div style="font-weight:bold;font-size:13px;margin-top:16px;">Monthly Summary (cancelled cases not counted)</div>
+ ${styledTable(["Month", "Total Cases", "Residential", "Other Property", "Other Property Breakdown"], summaryRows || trHtml(["-","","","",""]))}`;
  return { title: `Deposit Report ${startDate}~${endDate}`, html };
 }
 
@@ -1033,12 +1095,15 @@ function buildDepositReportDoc(startDate, endDate, cases) {
 // A case therefore shows up again in a later month with only the part done that month.
 function installPeriodSummary(c, startDate, endDate) {
  const done = [];    // { label, date }
+ const earlier = []; // done before this period (kept so a later month still shows the history)
  const pending = []; // text
+ const beforeStart = (d) => !!d && !!startDate && d < startDate;
  const afterEnd = (d) => !!d && !!endDate && d > endDate;
  installComponentsForPackageType(c.pkg.packageType).forEach(([k, label]) => {
  const it = c.install[k];
  if (!it || !it.applicable) return;
  if (inRange(it.date, startDate, endDate)) done.push({ label, date: it.date });
+ else if (beforeStart(it.date)) earlier.push({ label, date: it.date });
  else if (!it.date) pending.push(label);
  else if (afterEnd(it.date)) pending.push(`${label} (done later ${fmtDate(it.date)})`);
  });
@@ -1046,17 +1111,25 @@ function installPeriodSummary(c, startDate, endDate) {
  if (!o.applicable) return;
  const label = o.name || "Other Item";
  if (inRange(o.date, startDate, endDate)) done.push({ label, date: o.date });
+ else if (beforeStart(o.date)) earlier.push({ label, date: o.date });
  else if (!o.date) pending.push(label);
  else if (afterEnd(o.date)) pending.push(`${label} (done later ${fmtDate(o.date)})`);
  });
  (c.install.pendingJobs || []).forEach(j => {
  const label = `Job: ${j.type}${j.detail ? ` - ${j.detail}` : ""}`;
  if (inRange(j.doneDate, startDate, endDate)) done.push({ label, date: j.doneDate });
+ else if (beforeStart(j.doneDate)) earlier.push({ label, date: j.doneDate });
  else if (!j.doneDate) pending.push(label);
  else if (afterEnd(j.doneDate)) pending.push(`${label} (done later ${fmtDate(j.doneDate)})`);
  });
  done.sort((a, b) => a.date.localeCompare(b.date));
- return { done, pending };
+ earlier.sort((a, b) => a.date.localeCompare(b.date));
+ // First visit = earliest dated component/other item. The package price is only counted in the
+ // period that contains this date; later visits of the same case carry no price.
+ const allDates = [...done, ...earlier].filter(d => !d.label.startsWith("Job:")).map(d => d.date).sort();
+ const firstDate = allDates[0] || (done[0] && done[0].date) || "";
+ const isFirstVisitPeriod = !earlier.some(d => !d.label.startsWith("Job:")) ;
+ return { done, earlier, pending, firstDate, isFirstVisitPeriod };
 }
 function buildInstallReportDoc(startDate, endDate, cases) {
  const entries = cases
@@ -1077,26 +1150,30 @@ function buildInstallReportDoc(startDate, endDate, cases) {
  const o = (c.pkg.otherEntries || []).filter(e => e.name).map(e => `${e.name}${e.qty > 1 ? ` x${e.qty}` : ""}`);
  return o.length ? o.join("<br/>") : "-";
  };
- const rowFor = ({ c, done, pending }) => {
+ // Price / Collected / Balance only on the case's FIRST visit period; later visits show "-".
+ const rowFor = ({ c, done, earlier, pending, isFirstVisitPeriod }) => {
  const price = Number(c.pkg.sellingPrice) || 0;
  const collected = paymentTotal(c);
  const balance = price - collected;
+ const money = (v) => isFirstVisitPeriod ? fmtMoney(v) : "-";
  return trHtml([
  c.customerName || "-", agentDisplay(c), c.installAddress || "-",
+ earlier.length ? earlier.map(d => `${d.label}: ${fmtDate(d.date)}`).join("<br/>") : "-",
  done.map(d => `${d.label}: <b>${fmtDate(d.date)}</b>`).join("<br/>"),
  pending.length ? pending.map(t => `PENDING ${t}`).join("<br/>") : "-",
  c.pkg.packageType === "Solar Package" ? `${c.pkg.panelCount || "-"} / ${c.pkg.panelSizeW || "-"}W` : c.pkg.packageType,
  inverterOf(c), otherGoodsOf(c),
- fmtMoney(price), fmtMoney(collected), fmtMoney(balance),
- c.payment.isLoanCase ? "Case Loan Case" : "-",
- ], pending.length ? "background:#FFF6E8;color:#8A6416;" : "");
+ money(price), money(collected), money(balance),
+ [c.payment.isLoanCase ? "Case Loan Case" : "", isFirstVisitPeriod ? "" : "Continued (price counted in first visit month)"].filter(Boolean).join("<br/>") || "-",
+ ], pending.length ? "background:#FFF6E8;color:#8A6416;" : !isFirstVisitPeriod ? "background:#F0F6FB;" : "");
  };
- const headers = ["Customer", "Agent", "Install Address", "Installed This Period", "Still Pending", "Panel Spec", "Inverter", "Other Items", "Price", "Collected", "Balance", "Remark"];
+ const headers = ["Customer", "Agent", "Install Address", "Earlier Visits", "Installed This Period", "Still Pending", "Panel Spec", "Inverter", "Other Items", "Price", "Collected", "Balance", "Remark"];
  // One section per property type (Residential, Shop, Factory...) instead of one mixed table.
  const groups = [...PROPERTY_TYPES.map(p => ({ label: p.en, items: entries.filter(x => x.c.pkg.propertyType === p.v) })),
  { label: "NOT SET", items: entries.filter(x => !PROPERTY_TYPES.some(p => p.v === x.c.pkg.propertyType)) }]
  .filter(g => g.items.length > 0);
- const sumOf = (items) => {
+ const sumOf = (allItems) => {
+ const items = allItems.filter(x => x.isFirstVisitPeriod);
  const price = items.reduce((s, x) => s + (Number(x.c.pkg.sellingPrice) || 0), 0);
  const collected = items.reduce((s, x) => s + paymentTotal(x.c), 0);
  return { price, collected, balance: price - collected };
@@ -1108,9 +1185,46 @@ function buildInstallReportDoc(startDate, endDate, cases) {
  <div style="margin-top:6px;font-size:12px;">${g.label} subtotal: Value ${fmtMoney(t.price)} &nbsp;|&nbsp; Collected ${fmtMoney(t.collected)} &nbsp;|&nbsp; Balance ${fmtMoney(t.balance)}</div>`;
  }).join("");
  const tot = sumOf(entries);
+ // SUMMARY: first-visit cases (done or not yet fully done, each counted once, with package TOTAL)
+ // are kept apart from continue-jobs (2nd / 3rd visit of a case already counted — no price).
+ const sumRow = (label, grp) => {
+ const first = grp.filter(x => x.isFirstVisitPeriod);
+ const cont = grp.filter(x => !x.isFirstVisitPeriod);
+ const firstDone = first.filter(x => x.pending.length === 0).length;
+ const firstOpen = first.length - firstDone;
+ const total = first.reduce((t, x) => t + (Number(x.c.pkg.sellingPrice) || 0), 0);
+ const contDone = cont.filter(x => x.pending.length === 0).length;
+ return { label, first: first.length, firstDone, firstOpen, total, cont: cont.length, contDone, contOpen: cont.length - contDone };
+ };
+ const sumRows = [
+ sumRow("Residential", entries.filter(x => x.c.pkg.propertyType === "Residential")),
+ sumRow("Commercial / Other Property", entries.filter(x => x.c.pkg.propertyType !== "Residential")),
+ ];
+ const sumAll = sumRows.reduce((a, r) => ({ label: "TOTAL", first: a.first + r.first, firstDone: a.firstDone + r.firstDone, firstOpen: a.firstOpen + r.firstOpen, total: a.total + r.total, cont: a.cont + r.cont, contDone: a.contDone + r.contDone, contOpen: a.contOpen + r.contOpen }), { first: 0, firstDone: 0, firstOpen: 0, total: 0, cont: 0, contDone: 0, contOpen: 0 });
+ const summaryHtml = `<div style="font-weight:bold;font-size:14px;margin-top:22px;color:#0B2A4A;">SUMMARY</div>
+ <div style="font-size:11px;color:#666;margin:2px 0 4px;">*First Visit = new case this period (finished or not yet finished, counted once, with package total). Continue Job = 2nd / 3rd visit of a case already counted earlier (Pending Job, no price).</div>
+ ${styledTable(["Property", "First Visit Cases", "Finished", "Not Finished Yet", "Total Package", "Continue Job Cases", "Continue Finished", "Continue Not Finished"],
+ [...sumRows, sumAll].map(r => trHtml([r.label === "TOTAL" ? `<b>TOTAL</b>` : r.label, `<b>${r.first}</b>`, r.firstDone, r.firstOpen, `<b>${fmtMoney(r.total)}</b>`, `<b>${r.cont}</b>`, r.contDone, r.contOpen], r.label === "TOTAL" ? "background:#E8EEF5;" : "")).join(""))}`;
+ // Same summary per Agent (A-Z): first-visit cases (Residential / Commercial) + package total, and continue jobs.
+ const agentNames = [...new Set(entries.map(x => (agentDisplay(x.c) || "NO AGENT").toString().toUpperCase()))].sort();
+ const agentSumRows = agentNames.map(nm => {
+ const grp = entries.filter(x => (agentDisplay(x.c) || "NO AGENT").toString().toUpperCase() === nm);
+ const first = grp.filter(x => x.isFirstVisitPeriod);
+ const res = first.filter(x => x.c.pkg.propertyType === "Residential").length;
+ const total = first.reduce((t, x) => t + (Number(x.c.pkg.sellingPrice) || 0), 0);
+ const cont = grp.filter(x => !x.isFirstVisitPeriod).length;
+ return { nm, first: first.length, res, com: first.length - res, total, cont };
+ });
+ const agentTot = agentSumRows.reduce((a, r) => ({ first: a.first + r.first, res: a.res + r.res, com: a.com + r.com, total: a.total + r.total, cont: a.cont + r.cont }), { first: 0, res: 0, com: 0, total: 0, cont: 0 });
+ const agentSummaryHtml = `<div style="font-weight:bold;font-size:13px;margin-top:16px;color:#0B2A4A;">SUMMARY BY AGENT</div>
+ ${styledTable(["Agent", "First Visit Cases", "Residential", "Commercial / Other", "Total Package", "Continue Job Cases"],
+ agentSumRows.map(r => trHtml([r.nm, `<b>${r.first}</b>`, r.res, r.com, `<b>${fmtMoney(r.total)}</b>`, r.cont])).join("") +
+ trHtml([`<b>TOTAL</b>`, `<b>${agentTot.first}</b>`, agentTot.res, agentTot.com, `<b>${fmtMoney(agentTot.total)}</b>`, agentTot.cont], "background:#E8EEF5;"))}`;
  const html = `${buildLetterheadHtml()}<h1 style="font-size:18px;margin:14px 0 6px;">Installation Report &nbsp;—&nbsp; ${dateRangeLabel(startDate, endDate)}</h1>
- <div style="font-size:11px;color:#666;margin-bottom:6px;">*Each case lists only what was installed inside this period. Anything not yet installed (no date, or done after this period) is shown as PENDING and will appear again in the report for the month it gets done.</div>
- ${sections || styledTable(headers, trHtml(["No cases","","","","","","","","","","",""]))}
+ <div style="font-size:11px;color:#666;margin-bottom:6px;">*A case that needs several visits appears in every month it is worked on. The package price is counted only once, in the month of the FIRST visit; later months show \"-\" and keep the earlier visits (with dates) in the Earlier Visits column. Anything not yet installed (no date, or done after this period) is shown as PENDING and will appear again in the report for the month it gets done.</div>
+ ${sections || styledTable(headers, trHtml(["No cases","","","","","","","","","","","",""]))}
+ ${summaryHtml}
+ ${agentSummaryHtml}
  <div style="margin-top:18px;font-size:13px;border-top:1px solid #ccc;padding-top:8px;">Cases in this report: ${list.length} &nbsp;|&nbsp; Total Value: ${fmtMoney(tot.price)} &nbsp;|&nbsp; Total Collected: ${fmtMoney(tot.collected)} &nbsp;|&nbsp; Balance: ${fmtMoney(tot.balance)}</div>`;
  return { title: `Installation Report ${startDate}~${endDate}`, html };
 }
@@ -1571,6 +1685,70 @@ function highestThresholdCrossedInRange(c, startDate, endDate) {
  return highest;
 }
 
+// Policy: once a case reaches 60% paid, install must be arranged within 35 days of the payment
+// that got it there. Most urgent (fewest days left / most overdue) is listed first.
+const SIXTY_PAID_INSTALL_DAYS = 35;
+function buildSixtyPaidCountdownReportDoc(cases) {
+ const today = todayISO();
+ const daysBetween = (a, b) => Math.floor((Date.parse(b) - Date.parse(a)) / 86400000);
+ const rows = cases
+ .filter(c => !(c.cancellation && c.cancellation.isCancelled) && !installComplete(c))
+ .map(c => ({ c, cross: paymentCrossDateForThreshold(c, 60) }))
+ .filter(x => x.cross)
+ .map(x => ({ ...x, elapsed: daysBetween(x.cross, today) }))
+ .map(x => ({ ...x, left: SIXTY_PAID_INSTALL_DAYS - x.elapsed, deadline: addDaysISO(x.cross, SIXTY_PAID_INSTALL_DAYS) }))
+ .sort((a, b) => a.left - b.left);
+ // Countdown cell: deadline date + days left (or overdue), counted from the date that threshold was reached.
+ const cdText = (cross) => {
+ if (!cross) return "-";
+ const left = SIXTY_PAID_INSTALL_DAYS - daysBetween(cross, today);
+ return `${fmtDate(addDaysISO(cross, SIXTY_PAID_INSTALL_DAYS))}<br/>${left < 0 ? `<b>OVERDUE ${-left} day${-left > 1 ? "s" : ""}</b>` : `${left} day${left === 1 ? "" : "s"} left`}`;
+ };
+ const cd = (cross) => cdText(cross);
+ const cd80 = (c) => cdText(paymentCrossDateForThreshold(c, 80));
+ const COLS = 14;
+ const rowHtml = (x) => trHtml([
+ x.c.customerName || "-", agentDisplay(x.c), x.c.pkg.propertyType || "NOT SET", districtAreaText(x.c),
+ x.c.pkg.panelSizeW ? `${x.c.pkg.panelSizeW}W` : "-", x.c.pkg.panelCount || "-", inverterSpecText(x.c), otherItemsText(x.c),
+ fmtDate(x.cross), cd(x.cross),
+ paymentCrossDateForThreshold(x.c, 80) ? fmtDate(paymentCrossDateForThreshold(x.c, 80)) : "-", cd80(x.c),
+ `${paymentPercent(x.c)}%`, x.c.install.deliveryDate ? fmtDate(x.c.install.deliveryDate) : "Not scheduled",
+ ], x.left < 0 ? "background:#FBEAEA;color:#8B3A3A;" : x.left <= 7 ? "background:#FFF6E8;color:#8A6416;" : "");
+ // Installation plans crews by area: Residential and Other Property are listed separately (own
+ // colour), each grouped by Region (Johor, Melaka...) then District, and inside a district the
+ // case that reached 60% earliest (= least days left) sits on top.
+ const sections = [
+ { title: "RESIDENTIAL (Rumah)", list: rows.filter(x => x.c.pkg.propertyType === "Residential"), band: "#1F5F99", tint: "#E3EEF9", sub: "#F1F6FC" },
+ { title: "OTHER PROPERTY (Commercial / Factory / Shop / Petrol Station / Not Set)", list: rows.filter(x => x.c.pkg.propertyType !== "Residential"), band: "#8A4B14", tint: "#F8EBDD", sub: "#FCF5EC" },
+ ];
+ const regionOf = (x) => (x.c.pkg.region || "").trim() || "Region Not Set";
+ const distOf = (x) => (x.c.pkg.district || "").trim() || "District Not Set";
+ const byKey = (a, b) => (a === "Region Not Set" ? 1 : b === "Region Not Set" ? -1 : a.localeCompare(b));
+ const sectionHtml = (sec) => {
+ const regions = [...new Set(sec.list.map(regionOf))].sort(byKey);
+ const inner = regions.map(rg => {
+ const inRegion = sec.list.filter(x => regionOf(x) === rg);
+ const districts = [...new Set(inRegion.map(distOf))].sort(byKey);
+ const regionHead = `<tr><td colspan="${COLS}" style="border:1px solid #ccc;padding:6px 9px;background:${sec.tint};font-weight:bold;font-size:12.5px;">${rg.toUpperCase()} &nbsp;—&nbsp; ${inRegion.length} case${inRegion.length > 1 ? "s" : ""}</td></tr>`;
+ const distRows = districts.map(d => {
+ const items = inRegion.filter(x => distOf(x) === d).sort((a, b) => a.left - b.left);
+ return `<tr><td colspan="${COLS}" style="border:1px solid #ccc;padding:4px 9px 4px 22px;background:${sec.sub};font-size:11.5px;font-weight:bold;">${d} (${items.length})</td></tr>` + items.map(rowHtml).join("");
+ }).join("");
+ return regionHead + distRows;
+ }).join("");
+ const head = `<div style="margin-top:18px;padding:7px 10px;background:${sec.band};color:#fff;font-weight:bold;font-size:13px;">${sec.title} &nbsp;—&nbsp; ${sec.list.length} case${sec.list.length === 1 ? "" : "s"}</div>`;
+ return head + styledTable(["Customer", "Agent", "Property", "District / Area", "Panel Size", "Panel Count", "Inverter", "Other Items", "60% Reached", "60% Deadline / Countdown", "80% Reached", "80% Deadline / Countdown", "Paid", "Install Date"],
+ inner || trHtml(["No cases", "", "", "", "", "", "", "", "", "", "", "", "", ""]));
+ };
+ const overdue = rows.filter(x => x.left < 0).length;
+ const html = `${buildLetterheadHtml()}<h1 style="font-size:18px;margin:14px 0 6px;">60%+ Paid &mdash; Installation Countdown &nbsp;—&nbsp; ${fmtDate(today)}</h1>
+ <div style="font-size:11px;color:#666;margin-bottom:4px;">*Counted from the payment date that took the case to 60% (or 80%). Install should be arranged within ${SIXTY_PAID_INSTALL_DAYS} days. Not yet installed only.</div>
+ <div style="font-size:11px;color:#666;margin-bottom:4px;">*Grouped by Region, then District. Within each district the earliest 60% Reached is on top. Overdue in red, 7 days or less in orange.</div>
+ ${sections.map(sectionHtml).join("")}
+ <div style="margin-top:14px;font-size:13px;">Waiting: ${rows.length} &nbsp;|&nbsp; Residential: ${sections[0].list.length} &nbsp;|&nbsp; Other Property: ${sections[1].list.length} &nbsp;|&nbsp; Overdue: ${overdue}</div>`;
+ return { title: `60% Paid Installation Countdown ${fmtDate(today)}`, html };
+}
+
 function buildPaymentThresholdReportDoc(thresholdPct, startDate, endDate, cases) {
  const list = cases.filter(c => highestThresholdCrossedInRange(c, startDate, endDate) === thresholdPct);
  const rows = list.map(c => {
@@ -1947,7 +2125,7 @@ function buildInstallQueueReportDoc(cases) {
 }
 
 function buildPropertyTypeSummaryDoc(startDate, endDate, cases) {
- const deals = cases.filter(c => inRange(firstPaymentDate(c), startDate, endDate));
+ const deals = cases.filter(c => inRange(salesDateOf(c), startDate, endDate));
  const installs = cases.filter(c => installComplete(c) && inRange(lastInstallDate(c), startDate, endDate));
  const rowsFor = (list) => PROPERTY_TYPES.map(p => trHtml([`${p.en}`, list.filter(c => c.pkg.propertyType === p.v).length])).join("");
  const html = `${buildLetterheadHtml()}<h1 style="font-size:18px;margin:14px 0 6px;"> Property Type Summary &nbsp;—&nbsp; ${dateRangeLabel(startDate, endDate)}</h1>
@@ -2106,7 +2284,7 @@ function normalizeCase(c) {
  : base.pkg.discountEntries,
  },
  payment: { ...base.payment, ...(c.payment || {}) },
- seda: { ...base.seda, ...(c.seda || {}) },
+ seda: { ...base.seda, ...(c.seda || {}), applicationFees: (c.seda && Array.isArray(c.seda.applicationFees)) ? c.seda.applicationFees : [] },
  install: { ...base.install, ...(c.install || {}),
  panel: { ...base.install.panel, ...(c.install && c.install.panel) },
  inverter: { ...base.install.inverter, ...(c.install && c.install.inverter) },
@@ -2215,7 +2393,6 @@ async function saveAdminDirectory(list) {
  try { await storage.set("adminDirectory", JSON.stringify(list), true); } catch (e) { console.error(e); }
 }
 
-// Staff names only (no passwords) for the sign-in picker, before anyone is signed in.
 async function loadStaffNames() {
  try {
  const res = await fetch("/api/auth/staff-names", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -2779,26 +2956,26 @@ function buildDOPrintDoc(d, c) {
  ? `${fmtDate(c.install.deliveryDate)}${c.delivery.installTimeSlot ? ` - ${c.delivery.installTimeSlot}` : ""}${c.delivery.installTime ? ` @${c.delivery.installTime}` : ""}`
  : "-";
  const trackedRows = (d.items || []).map((it, i) => `<tr>
- <td style="padding:5px 8px;border:1px solid #ccc;">${i + 1}. ${it.label === "Panel" ? "Solar Panel" : it.label}${it.key === "inverter" && c.pkg.phaseType ? ` (${c.pkg.phaseType})` : ""}</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;color:#2C5F8A;">${it.model || "-"}</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;font-weight:bold;color:#2C5F8A;">${it.qty}</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;">☐</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;">☐</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;">☐</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;">${i + 1}. ${it.label === "Panel" ? "Solar Panel" : it.label}${it.key === "inverter" && c.pkg.phaseType ? ` (${c.pkg.phaseType})` : ""}</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;color:#2C5F8A;">${it.model || "-"}</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;font-weight:bold;color:#2C5F8A;">${it.qty}</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;">☐</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;">☐</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;">☐</td>
  </tr>`).join("");
  // Accessory checklist (rails, clamps, brackets...) — each DO keeps its own editable list, since
  // these were never quantity-tracked against the case; Admin types the real count per delivery,
  // same as the old per-case checklist worked.
  const checklistRows = (d.checklist || []).map((it, i) => `<tr>
- <td style="padding:5px 8px;border:1px solid #ccc;">${(d.items || []).length + i + 1}. ${it.name || "-"}</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;color:#2C5F8A;">${it.model || "-"}</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;font-weight:bold;color:#2C5F8A;">${it.qty || "-"}</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;">☐</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;">☐</td>
- <td style="padding:5px 8px;border:1px solid #ccc;text-align:center;">☐</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;">${(d.items || []).length + i + 1}. ${it.name || "-"}</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;color:#2C5F8A;">${it.model || "-"}</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;font-weight:bold;color:#2C5F8A;">${it.qty || "-"}</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;">☐</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;">☐</td>
+ <td style="padding:2px 6px;border:1px solid #ccc;text-align:center;">☐</td>
  </tr>`).join("");
  const rows = trackedRows + checklistRows;
- const html = `
+ const html = `<style>@page { size: A4 portrait; margin: 8mm; } @media print { .eternalgy-print-area { padding: 0 !important; } .do-a4 { font-size: 11px; zoom: 0.92; } .do-a4 table { page-break-inside: avoid; } }</style><div class="do-a4">
  <div style="display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #0B2A4A;padding-bottom:10px;">
  <div>
  <div style="font-weight:bold;font-size:15px;color:#0B2A4A;">ETERNALGY SDN. BHD.</div>
@@ -2809,17 +2986,28 @@ function buildDOPrintDoc(d, c) {
  <div style="font-size:13px;font-weight:bold;">No. <span style="color:#C24141;">${doNo}</span></div>
  </div>
  </div>
- <div style="margin-top:14px;font-weight:bold;font-size:12.5px;">A. CLIENT INFORMATION</div>
- <table style="width:100%;font-size:12px;margin-top:4px;border-collapse:collapse;">
- <tr><td style="width:150px;color:#666;padding:3px 0;">Customer Name</td><td style="font-weight:bold;">${c.customerName || "-"}</td></tr>
- <tr><td style="color:#666;padding:3px 0;">Service Agent</td><td>${agentDisplay(c)}</td></tr>
- <tr><td style="color:#666;padding:3px 0;">Contact number</td><td>${c.customerPhone || "-"}</td></tr>
- <tr><td style="color:#666;padding:3px 0;">Installation Date</td><td><b>${installDateStr}</b></td></tr>
- <tr><td style="color:#666;padding:3px 0;">Installation Address</td><td>${c.installAddress || "-"}</td></tr>
- <tr><td style="color:#666;padding:3px 0;">Delivery Address</td><td>${addressCell}</td></tr>
- <tr><td style="color:#666;padding:3px 0;">Remarks</td><td>${d.remarks || "-"}</td></tr>
+ <div style="margin-top:10px;font-weight:bold;font-size:12.5px;">A. CLIENT INFORMATION</div>
+ <table style="width:100%;border-collapse:collapse;margin-top:3px;"><tr>
+ <td style="width:44%;vertical-align:top;padding-right:10px;">
+ <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
+ <tr><td style="width:100px;color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Customer Name</td><td style="font-weight:bold;">${c.customerName || "-"}</td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Service Agent</td><td>${agentDisplay(c)}</td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Contact number</td><td style="font-weight:900;color:#000;font-size:12.5px;">${c.customerPhone || "-"}</td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Property Type</td><td>${c.pkg.propertyType || "-"}</td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Phase Type</td><td>${c.pkg.phaseType || "-"}</td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">System Type</td><td>${c.pkg.systemType || "-"}</td></tr>
  </table>
- <div style="margin-top:16px;font-weight:bold;font-size:12.5px;">B. Delivery Details</div>
+ </td>
+ <td style="width:56%;vertical-align:top;padding-left:10px;border-left:1px solid #ccc;">
+ <table style="width:100%;font-size:11.5px;border-collapse:collapse;">
+ <tr><td style="width:115px;color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Installation Date</td><td><b>${installDateStr}</b></td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Installation Address</td><td style="font-weight:900;color:#000;font-size:12.5px;">${c.installAddress || "-"}</td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Delivery Address</td><td style="font-weight:900;color:#000;font-size:12.5px;">${addressCell}</td></tr>
+ <tr><td style="color:#666;padding:2px 0;white-space:nowrap;vertical-align:top;">Remarks</td><td>${d.remarks || "-"}</td></tr>
+ </table>
+ </td>
+ </tr></table>
+ <div style="margin-top:10px;font-weight:bold;font-size:12.5px;">B. Delivery Details</div>
  <table style="width:100%;font-size:12px;margin-top:4px;border-collapse:collapse;">
  <tr>
  <td style="width:140px;color:#666;padding:3px 0;">Delivery Pick up</td><td>${d.pickupDateTime || "-"}</td>
@@ -2834,7 +3022,7 @@ function buildDOPrintDoc(d, c) {
  <td style="color:#666;padding:3px 0;">Lorry no.</td><td>${d.lorryNo || "-"}</td>
  </tr>
  </table>
- <div style="margin-top:14px;font-weight:bold;font-size:12.5px;">Deliver Items List</div>
+ <div style="margin-top:8px;font-weight:bold;font-size:12.5px;">Deliver Items List</div>
  <table style="width:100%;border-collapse:collapse;font-size:11.5px;margin-top:4px;">
  <thead><tr style="background:#F5F3ED;">
  <th style="padding:6px 8px;border:1px solid #ccc;text-align:left;">Product Name</th>
@@ -2846,7 +3034,7 @@ function buildDOPrintDoc(d, c) {
  </tr></thead>
  <tbody>${rows || `<tr><td colspan="6" style="padding:10px;text-align:center;color:#999;">No items on this DO</td></tr>`}</tbody>
  </table>
- <table style="width:100%;font-size:11.5px;margin-top:10px;">
+ <table style="width:100%;font-size:11px;margin-top:6px;">
  <tr>
  <td style="color:#666;padding:3px 0;width:150px;">Material Planner</td><td style="font-weight:bold;">${d.materialPlanner || "-"}</td>
  <td style="color:#666;padding:3px 0;width:150px;">Warehouse Manager</td><td style="font-weight:bold;">${d.warehouseManager || "-"}</td>
@@ -2856,20 +3044,22 @@ function buildDOPrintDoc(d, c) {
  <td style="color:#666;padding:3px 0;">Date</td><td>${d.warehouseManagerDate ? fmtDate(d.warehouseManagerDate) : "-"}</td>
  </tr>
  </table>
- <div style="margin-top:18px;font-weight:bold;font-size:12.5px;">Acknowledgement</div>
- <table style="width:100%;border-collapse:collapse;margin-top:6px;font-size:11.5px;">
+ <div style="margin-top:10px;font-weight:bold;font-size:12.5px;">Acknowledgement</div>
+ <table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:11px;table-layout:fixed;">
  <tr style="background:#F5F3ED;">
- <th style="padding:6px;border:1px solid #ccc;width:33%;">Packer</th>
- <th style="padding:6px;border:1px solid #ccc;width:33%;">Deliver</th>
- <th style="padding:6px;border:1px solid #ccc;width:34%;">Recipient</th>
+ <th style="padding:4px;border:1px solid #ccc;">Packer</th>
+ <th style="padding:4px;border:1px solid #ccc;">Checker</th>
+ <th style="padding:4px;border:1px solid #ccc;">Deliver</th>
+ <th style="padding:4px;border:1px solid #ccc;">Recipient <span style="font-size:8.5px;color:#999;font-weight:normal;">(Company Stamp if applicable)</span></th>
  </tr>
  <tr>
- <td style="border:1px solid #ccc;height:56px;vertical-align:bottom;padding:4px;">Sign:</td>
- <td style="border:1px solid #ccc;height:56px;vertical-align:bottom;padding:4px;">Sign:</td>
- <td style="border:1px solid #ccc;height:56px;vertical-align:bottom;padding:4px;">Sign:<br/><span style="font-size:9px;color:#999;">(Company Stamp if applicable)</span></td>
+ <td style="border:1px solid #ccc;height:54px;vertical-align:bottom;padding:4px;font-size:11px;line-height:1.9;">Sign:<br/>Name:<br/>Date:</td>
+ <td style="border:1px solid #ccc;height:54px;vertical-align:bottom;padding:4px;font-size:11px;line-height:1.9;">Sign:<br/>Name:<br/>Date:</td>
+ <td style="border:1px solid #ccc;height:54px;vertical-align:bottom;padding:4px;font-size:11px;line-height:1.9;">Sign:<br/>Name:<br/>Date:</td>
+ <td style="border:1px solid #ccc;height:54px;vertical-align:bottom;padding:4px;font-size:11px;line-height:1.9;">Sign:<br/>Name:<br/>Date:</td>
  </tr>
  </table>
- <div style="margin-top:10px;font-size:10.5px;color:#666;">This delivery note serves as proof of delivery. Please check and sign upon receipt.</div>`;
+ <div style="margin-top:6px;font-size:10px;color:#666;">This delivery note serves as proof of delivery. Please check and sign upon receipt.</div></div>`;
  return { title: `Delivery Order ${doNo}`, html };
 }
 // Report for Warehouse: how many DOs went out in a given range, so staff can check monthly counts
@@ -3193,7 +3383,7 @@ function TabHistory({ c, deptKey }) {
  );
 }
 
-function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDirectory, logDoc, actorName }) {
+function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDirectory, logDoc, actorName, existingCases }) {
  const [c, setC] = useState(initial);
  // After Save, the parent hands back the just-saved case (with the new edit-history entry
  // attached) as a fresh `initial` — but this form's own state was only seeded from `initial`
@@ -3280,6 +3470,37 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  otherItems: prev.install.otherItems.map(it => it.id === id ? { ...it, [field]: value } : it) } }));
  const removeInstallOther = (id) => setC(prev => ({ ...prev, install: { ...prev.install,
  otherItems: prev.install.otherItems.filter(it => it.id !== id) } }));
+ // Every Package "Other Item" must also show up as an Install component. Items linked by
+ // sourceId follow the package (name changes, removal); manual ones (no sourceId) are untouched.
+ const otherSyncKey = JSON.stringify((c.pkg.otherEntries || []).map(e => [e.id, e.name]));
+ useEffect(() => {
+ setC(prev => {
+ const entries = (prev.pkg.otherEntries || []).filter(e => e.name);
+ const cur = prev.install.otherItems || [];
+ let changed = false;
+ let next = cur.filter(it => {
+ if (!it.sourceId) return true;
+ const keep = entries.some(e => e.id === it.sourceId) || it.date;
+ if (!keep) changed = true;
+ return keep;
+ }).map(it => {
+ const e = it.sourceId && entries.find(x => x.id === it.sourceId);
+ if (e && e.name !== it.name) { changed = true; return { ...it, name: e.name }; }
+ return it;
+ });
+ entries.forEach(e => {
+ if (!next.some(it => it.sourceId === e.id)) {
+ next = [...next, { id: uid(), sourceId: e.id, name: e.name, applicable: true, date: "" }];
+ changed = true;
+ }
+ });
+ return changed ? { ...prev, install: { ...prev.install, otherItems: next } } : prev;
+ });
+ // eslint-disable-next-line react-hooks/exhaustive-deps
+ }, [otherSyncKey]);
+ const addSedaFee = () => setC(prev => ({ ...prev, seda: { ...prev.seda, applicationFees: [...(prev.seda.applicationFees || []), { id: uid(), amount: "", date: "", note: "" }] } }));
+ const updateSedaFee = (id, field, value) => setC(prev => ({ ...prev, seda: { ...prev.seda, applicationFees: (prev.seda.applicationFees || []).map(f => f.id === id ? { ...f, [field]: value } : f) } }));
+ const removeSedaFee = (id) => setC(prev => ({ ...prev, seda: { ...prev.seda, applicationFees: (prev.seda.applicationFees || []).filter(f => f.id !== id) } }));
  const patchJobs = (fn) => setC(prev => ({ ...prev, install: { ...prev.install, pendingJobs: fn(prev.install.pendingJobs || []) } }));
  const addPendingJob = () => patchJobs(l => [...l, { id: uid(), type: PENDING_JOB_TYPES[0], detail: "", createdDate: todayISO(), visits: [], doneDate: "", doneBy: "" }]);
  const updatePendingJob = (id, field, value) => patchJobs(l => l.map(j => j.id === id ? { ...j, [field]: value } : j));
@@ -3435,6 +3656,11 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  JSON.stringify(c.pkg.eppEntries),
  JSON.stringify(c.pkg.discountEntries), JSON.stringify(c.pkg.otherEntries)]);
 
+ // Same Case ID on two cases is never allowed (compared ignoring case/spaces; the case itself is excluded).
+ const duplicateCase = c.caseNumber
+ ? (existingCases || []).find(x => x.id !== c.id && (x.caseNumber || "").trim().toUpperCase() === c.caseNumber.trim().toUpperCase())
+ : null;
+
  const handleSave = () => {
  // These four identify the case everywhere — reports, search, and the printed documents all
  // depend on them, so a case can't be saved half-identified.
@@ -3443,6 +3669,11 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  if (!c.createdAt) missing.push("Date of Issue");
  if (!c.agentName) missing.push("Agent");
  if (!c.customerName) missing.push("Customer Full Name");
+ if (duplicateCase) {
+ alert(`Case ID "CASE-${c.caseNumber}" is already used by ${duplicateCase.customerName || "another case"}.\n\nThe same Case ID cannot be used twice. Please change it.`);
+ setTab("package");
+ return;
+ }
  if (missing.length) {
  alert(`Please fill in the following required field(s) before saving:\n\n- ${missing.join("\n- ")}`);
  setTab("package");
@@ -3493,6 +3724,11 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  background: c.caseNumber ? "transparent" : "#FBEAEA", outline: "none", flex: 1, minWidth: 80,
  padding: c.caseNumber ? 0 : "2px 6px", textTransform: "uppercase" }} />
  </div>
+ {duplicateCase && (
+ <div style={{ marginTop: 6, fontSize: 12, fontWeight: 700, color: "#C24141" }}>
+ This Case ID is already used by {duplicateCase.customerName || "another case"} — cannot be duplicated.
+ </div>
+ )}
  </div>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 9 }}>
  <Field label="Date of Issue">
@@ -3762,7 +3998,8 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <div style={{ background: "#FBF8F0", border: "1px dashed #E3D8B8", borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
  <span style={{ fontSize: 12, fontWeight: 700, color: "#B08A2E" }}>Other Items (Goods — ships with DO)</span>
  <div style={{ display: "grid", gridTemplateColumns: "1fr 110px 70px auto", gap: 7 }}>
- <TextInput value={otherInput.name} onChange={e => setOtherInput(prev => ({ ...prev, name: e.target.value }))} placeholder="Item Name / Description" style={{ padding: "5px 7px", fontSize: 12 }} />
+ <ItemPicker category="Other Goods" itemDirectory={itemDirectory} model={otherInput.name}
+ onModelChange={v => setOtherInput(prev => ({ ...prev, name: v }))} onDescriptionChange={() => {}} placeholder="Item Name / Description" />
  <NumberInput value={otherInput.price} onChange={e => setOtherInput(prev => ({ ...prev, price: e.target.value }))} placeholder="Price (RM)" style={{ padding: "5px 7px", fontSize: 12 }} />
  <NumberInput value={otherInput.qty} onChange={e => setOtherInput(prev => ({ ...prev, qty: e.target.value }))} placeholder="Qty" style={{ padding: "5px 7px", fontSize: 12 }} />
  <button onClick={addOtherEntry} disabled={!otherInput.name || !otherInput.price} style={{ ...btnPrimary, padding: "5px 10px", fontSize: 11.5, opacity: (!otherInput.name || !otherInput.price) ? 0.45 : 1 }}>
@@ -3885,10 +4122,6 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  )}
  </div>
 
- <Field label="Note">
- <TextArea value={c.pkg.note} onChange={e => set("pkg.note", e.target.value)} placeholder="Other package details" />
- </Field>
-
  </div>
  )}
  </div>
@@ -3952,6 +4185,15 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  <span> Price: <b>{fmtMoney(price)}</b></span>
  <span style={{ color: "#3C8C63" }}> Collected: <b>{fmtMoney(total)}</b></span>
  <span style={{ color: balance > 0 ? "#C24141" : "#3C8C63" }}> Balance: <b>{fmtMoney(balance)}</b></span>
+ {/* Purple on purpose: not the same thing as the install-queue Special Approval below. Filling a
+ date here makes this case count in THAT date's month in the Deposit report and sales counts. */}
+ <span style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#F3EEFA", border: "1px solid #D5C6EC", borderRadius: 8, padding: "3px 8px", fontFamily: "'Inter', sans-serif" }}>
+ <span style={{ fontSize: 11, fontWeight: 700, color: "#6B4E9E" }}>SPECIAL APPROVAL (SALES MONTH)</span>
+ <DateInputDMY value={c.payment.salesApprovalDate || ""} onChange={e => set("payment.salesApprovalDate", e.target.value)} style={{ padding: "3px 6px", fontSize: 11.5, width: 120, borderColor: "#D5C6EC" }} />
+ <input value={c.payment.salesApprovalBy || ""} onChange={e => set("payment.salesApprovalBy", e.target.value)} placeholder="Approved by"
+ style={{ padding: "3px 6px", fontSize: 11.5, width: 100, border: "1px solid #D5C6EC", borderRadius: 6 }} />
+ {c.payment.salesApprovalDate && <span style={{ fontSize: 11, color: "#6B4E9E" }}>counts in {monthLabel(monthKey(c.payment.salesApprovalDate))}</span>}
+ </span>
  </div>
 
  <div style={{ background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 8, padding: 8, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -4071,6 +4313,24 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  style={installComplete(c) && !c.seda.milestoneDate ? { borderColor: "#C24141", background: "#FBEAEA" } : undefined} />
  </Field>
  </div>
+ <div style={{ borderTop: "1px solid #F0ECE1", paddingTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5 }}>APPLICATION FEE</div>
+ {(c.seda.applicationFees || []).map((f, i) => (
+ <div key={f.id} style={{ display: "grid", gridTemplateColumns: "22px 130px 130px 1fr 28px", gap: 6, alignItems: "center" }}>
+ <span style={{ fontSize: 11, color: "#9AA2AD" }}>{i + 1}.</span>
+ <NumberInput value={f.amount} onChange={e => updateSedaFee(f.id, "amount", e.target.value)} placeholder="RM" style={{ padding: "5px 6px", fontSize: 11.5 }} />
+ <DateInputDMY value={f.date} onChange={e => updateSedaFee(f.id, "date", e.target.value)} style={{ padding: "5px 6px", fontSize: 11.5 }} />
+ <TextInput value={f.note} onChange={e => updateSedaFee(f.id, "note", e.target.value)} placeholder="Note (e.g. fee changed)" style={{ padding: "5px 6px", fontSize: 11.5 }} />
+ <button onClick={() => removeSedaFee(f.id)} style={{ border: "none", background: "none", cursor: "pointer", color: "#C24141", padding: 0 }}><Trash2 size={14} /></button>
+ </div>
+ ))}
+ <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+ <button onClick={addSedaFee} style={{ ...btnGhost, padding: "5px 10px", fontSize: 11.5 }}><Plus size={12}/> Add Fee</button>
+ {(c.seda.applicationFees || []).length > 0 && (
+ <span style={{ fontSize: 12, color: "#6B7686" }}>Total: <b>{fmtMoney2((c.seda.applicationFees || []).reduce((t, f) => t + (Number(f.amount) || 0), 0))}</b></span>
+ )}
+ </div>
+ </div>
  {installComplete(c) && !c.seda.milestoneDate && (
  <div style={{ background: "#FBEAEA", border: "1px solid #E3A9A9", borderRadius: 8, padding: "7px 12px", fontSize: 11.5, color: "#8B3A3A" }}>
  Installation is done but the SEDA milestone hasn't been updated yet — this case is showing on the Pending Update Milestone report.
@@ -4102,19 +4362,8 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </div>
  </div>
  )}
- {/* Printed on the DO as "Installation Date" — it tells the customer when to expect the crew.
- Purely informational: stock is deducted by each component's own install date, not this. */}
- <div style={{ display: "grid", gridTemplateColumns: "180px 170px 130px", gap: 10 }}>
- <Field label="Installation Date">
- <DateInputDMY value={c.install.deliveryDate} onChange={e => set("install.deliveryDate", e.target.value)} />
- </Field>
- <Field label="Time Slot">
- <Select value={c.delivery.installTimeSlot} onChange={e => set("delivery.installTimeSlot", e.target.value)}
- options={[{ value: "", label: "Not Set" }, "Morning (AM)", "Afternoon (PM)", "Full Day"]} />
- </Field>
- <Field label="Time">
- <TextInput value={c.delivery.installTime} onChange={e => set("delivery.installTime", e.target.value)} placeholder="10.00am" />
- </Field>
+ <div style={{ fontSize: 11, color: "#9AA2AD" }}>
+ Installation Date / Time Slot / Time are now filled in on the Delivery Order form.
  </div>
 
  <div style={{ fontSize: 11, color: "#9AA2AD" }}>
@@ -4232,6 +4481,9 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </Field>
  <Field label="Branch">
  <TextInput value={c.tnb.branch} onChange={e => set("tnb.branch", e.target.value)} placeholder="TNB Branch" />
+ </Field>
+ <Field label="Stamp Duty Fee - Repayment Date">
+ <DateInputDMY value={c.tnb.stampDutyRepayDate || ""} onChange={e => set("tnb.stampDutyRepayDate", e.target.value)} />
  </Field>
  </div>
  <div style={{ background: "#F0F6FB", border: "1px solid #CFE2F0", borderRadius: 10, padding: "10px 14px" }}>
@@ -4493,6 +4745,9 @@ function CaseForm({ initial, onSave, onCancel, onDelete, agentDirectory, itemDir
  </Field>
  <Field label="Package Price (RM)">
  <NumberInput value={c.pkg.sellingPrice} disabled style={{ opacity: 0.6 }} />
+ </Field>
+ <Field label="Approved By">
+ <TextInput value={c.cancellation.approvedBy || ""} onChange={e => set("cancellation.approvedBy", e.target.value)} placeholder="Who approved the cancellation" />
  </Field>
  </div>
 
@@ -5055,7 +5310,7 @@ function CaseCard({ c, onClick }) {
  </div>
  <div style={{ display: "flex", gap: 14, fontSize: 12, color: "#8A93A0", fontFamily: "'IBM Plex Mono', monospace", flexWrap: "wrap" }}>
  <span>Agent: {agentDisplay(c)}</span>
- <span>: {firstPaymentDate(c) ? monthLabel(monthKey(firstPaymentDate(c))) : "No Deposit"}</span>
+ <span>: {salesDateOf(c) ? monthLabel(monthKey(salesDateOf(c))) : "No Deposit"}</span>
  <span> {paymentPercent(c)}%</span>
  <span>{fmtMoney(c.pkg.sellingPrice)}</span>
  </div>
@@ -5075,7 +5330,7 @@ function Dashboard({ cases, itemDirectory, docLogs, agentDirectory, deliveryOrde
  const [rangeEnd, setRangeEnd] = useState(today);
  const setPrintDoc = useContext(PrintContext);
 
- const dealsThisMonth = cases.filter(c => inRange(firstPaymentDate(c), rangeStart, rangeEnd));
+ const dealsThisMonth = cases.filter(c => inRange(salesDateOf(c), rangeStart, rangeEnd));
  const installedThisMonth = cases.filter(c => installComplete(c) && inRange(lastInstallDate(c), rangeStart, rangeEnd));
 
  const byType = (list) => PROPERTY_TYPES.map(p => ({ type: p.v, label: `${p.en}`, icon: p.icon, count: list.filter(c => c.pkg.propertyType === p.v).length }));
@@ -5121,8 +5376,6 @@ function Dashboard({ cases, itemDirectory, docLogs, agentDirectory, deliveryOrde
  </div>
  </div>
 
- <UpdateStatusBar />
-
  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
  <StatCard label="Case Total Cases" value={cases.length} sub="All" />
  <StatCard label="Total Value" value={fmtMoney(totalValue)} sub="cases All Cases" />
@@ -5147,7 +5400,6 @@ function Dashboard({ cases, itemDirectory, docLogs, agentDirectory, deliveryOrde
  <ReportGroup label="Deposit / Payment Progress" color={DEPT.payment.color}>
  <ReportBtn onClick={() => printReport(buildAgentFullListReportDoc(reportCases))}>Agent Full Case List</ReportBtn>
  <ReportBtn onClick={() => printReport(buildDepositReportDoc(rangeStart, rangeEnd, reportCases))}>Deposit Report</ReportBtn>
- <ReportBtn onClick={() => printReport(buildPaymentThresholdReportDoc(60, rangeStart, rangeEnd, reportCases))}>60%+ Paid</ReportBtn>
  <ReportBtn onClick={() => printReport(buildPaymentThresholdReportDoc(100, rangeStart, rangeEnd, reportCases))}> Full Payment</ReportBtn>
  <ReportBtn onClick={() => printReport(buildPendingLoReportDoc(reportCases))}>Pending Letter of Offer</ReportBtn>
  </ReportGroup>
@@ -5167,6 +5419,7 @@ function Dashboard({ cases, itemDirectory, docLogs, agentDirectory, deliveryOrde
  <ReportBtn onClick={() => printReport(buildInstallReportDoc(rangeStart, rangeEnd, reportCases))}>Installation Report</ReportBtn>
  <ReportBtn onClick={() => printReport(buildOutstandingAfterInstallReportDoc(reportCases))}>Installed but Not Fully Paid</ReportBtn>
  <ReportBtn onClick={() => printReport(buildInstallQueueReportDoc(reportCases))}>Install Queue</ReportBtn>
+ <ReportBtn onClick={() => printReport(buildSixtyPaidCountdownReportDoc(reportCases))}>60%+ Paid (35-day countdown)</ReportBtn>
  <ReportBtn onClick={() => printReport(buildPendingJobReportDoc(reportCases))}>Pending Installation Jobs</ReportBtn>
  <ReportBtn onClick={() => printReport(buildOMReportDoc(reportCases))}>O&M Report</ReportBtn>
  <ReportBtn onClick={() => printReport(buildPropertyTypeSummaryDoc(rangeStart, rangeEnd, reportCases))}>Property Type Summary</ReportBtn>
@@ -5530,8 +5783,8 @@ function CRMApp({ initialOperator, onSignOut }) {
  // Kept in sessionStorage so a page refresh doesn't force Admin to log in again. It's cleared
  // automatically when the browser tab closes, so the session still ends when they leave.
  const [currentOperator, setCurrentOperatorState] = useState(() => {
- if (initialOperator) return initialOperator;
- try {
+    if (initialOperator) return initialOperator;
+    try {
  const saved = sessionStorage.getItem("currentOperator");
  return saved ? JSON.parse(saved) : null;
  } catch { return null; }
@@ -5580,6 +5833,21 @@ function CRMApp({ initialOperator, onSignOut }) {
  else saveCasesLegacy(nextArray);
  }, [casesStorageMode]);
 
+ // Quiet single-case update (no history entry, no navigation) — used by the DO form to
+ // write the installation date/time onto the case without leaving the DO screen.
+ const patchCaseInstallSchedule = useCallback((caseId, fields) => {
+ const target = cases.find(x => x.id === caseId);
+ if (!target) return;
+ const updated = {
+ ...target,
+ install: { ...target.install, ...(fields.deliveryDate !== undefined ? { deliveryDate: fields.deliveryDate } : {}) },
+ delivery: { ...target.delivery,
+ ...(fields.installTimeSlot !== undefined ? { installTimeSlot: fields.installTimeSlot } : {}),
+ ...(fields.installTime !== undefined ? { installTime: fields.installTime } : {}) },
+ };
+ persistOne(updated, cases.map(x => x.id === caseId ? updated : x));
+ }, [cases, persistOne]);
+
  const saveAdminAccount = useCallback((account) => {
  setAdminDirectory(prev => {
  const list = prev || [];
@@ -5609,11 +5877,26 @@ function CRMApp({ initialOperator, onSignOut }) {
  setPendingLoginAction(() => action);
  }, [currentOperator]);
 
- // Cases point at their Agent by name (and code), not by id, so renaming an Agent has to carry the
- // new name onto every case already filed under the old one — otherwise those cases lose the link,
- // and lookups like the Agent's phone number for "Send → Agent" on WhatsApp silently come up empty.
- const saveAgent = useCallback((agent) => {
- const prevAgent = (agentDirectory || []).find(a => a.id === agent.id);
+ 
+  // Cases point at their Agent by name (and code), not by id, so renaming an Agent has to carry the
+  // new name onto every case already filed under the old one — otherwise those cases lose the link,
+  // and lookups like the Agent's phone number for "Send → Agent" on WhatsApp silently come up empty.
+  const prevAgentRename = useCallback((agent) => {
+    const prevAgent = (agentDirectory || []).find(a => a.id === agent.id);
+    if (!prevAgent || !prevAgent.name || (prevAgent.name === agent.name && prevAgent.code === agent.code)) return;
+    const renamed = (cases || []).filter(c => c.agentName === prevAgent.name).map(c => ({
+      ...c,
+      agentName: agent.name,
+      ...(c.agentCode === prevAgent.code ? { agentCode: agent.code } : {}),
+    }));
+    if (renamed.length === 0) return;
+    const byId = new Map(renamed.map(c => [c.id, c]));
+    setCases(prev => (prev || []).map(c => byId.get(c.id) || c));
+    (async () => { for (const c of renamed) { if (!(await saveCasePerDoc(c))) break; } })();
+  }, [agentDirectory, cases]);
+
+  const saveAgent = useCallback((agent) => {
+    prevAgentRename(agent);
  setAgentDirectory(prev => {
  const list = prev || [];
  const exists = list.some(a => a.id === agent.id);
@@ -5621,21 +5904,7 @@ function CRMApp({ initialOperator, onSignOut }) {
  saveAgentDirectory(next);
  return next;
  });
- if (!prevAgent || !prevAgent.name || (prevAgent.name === agent.name && prevAgent.code === agent.code)) return;
- const renamed = (cases || []).filter(c => c.agentName === prevAgent.name).map(c => ({
- ...c,
- agentName: agent.name,
- // Only follow the code change where the case still carries the old code — a case someone
- // filed with a different code on purpose keeps it.
- ...(c.agentCode === prevAgent.code ? { agentCode: agent.code } : {}),
- }));
- if (renamed.length === 0) return;
- const byId = new Map(renamed.map(c => [c.id, c]));
- setCases(prev => (prev || []).map(c => byId.get(c.id) || c));
- // One at a time, stopping at the first failure, so a dropped connection raises one alert rather
- // than one per case.
- (async () => { for (const c of renamed) { if (!(await saveCasePerDoc(c))) break; } })();
- }, [agentDirectory, cases]);
+ }, []);
  const deleteAgent = useCallback((id) => {
  setAgentDirectory(prev => {
  const next = (prev || []).filter(a => a.id !== id);
@@ -5847,7 +6116,7 @@ function CRMApp({ initialOperator, onSignOut }) {
  {role === "admin" && currentOperator && (
  <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.1)", borderRadius: 9, padding: "6px 10px" }}>
  <span style={{ color: "#fff", fontSize: 12 }}>👤 {currentOperator.name}</span>
- <button onClick={() => { setCurrentOperator(null); if (onSignOut) onSignOut(); }} style={{ background: "none", border: "none", color: "#C89B3C", fontSize: 11.5, cursor: "pointer", fontWeight: 600 }}>Sign Out</button>
+ <button onClick={() => setCurrentOperator(null)} style={{ background: "none", border: "none", color: "#C89B3C", fontSize: 11.5, cursor: "pointer", fontWeight: 600 }}>Sign Out</button>
  </div>
  )}
  <RoleTab active={role === "admin" && view.screen === "dashboard"} onClick={() => { setRole("admin"); setView({ screen: "dashboard" }); }} icon={LayoutDashboard} label="Dashboard" />
@@ -5870,7 +6139,7 @@ function CRMApp({ initialOperator, onSignOut }) {
  agentDirectory={agentDirectory} saveAgent={saveAgent} deleteAgent={deleteAgent}
  itemDirectory={itemDirectory} saveItem={saveItem} deleteItem={deleteItem}
  shipmentBatches={shipmentBatches} saveBatch={saveBatch} deleteBatch={deleteBatch}
- deliveryOrders={deliveryOrders} saveDO={saveDO} deleteDO={deleteDO}
+ deliveryOrders={deliveryOrders} saveDO={saveDO} deleteDO={deleteDO} patchCaseInstallSchedule={patchCaseInstallSchedule}
  docLogs={docLogs} logDoc={logDoc}
  adminDirectory={adminDirectory} saveAdminAccount={saveAdminAccount} deleteAdminAccount={deleteAdminAccount}
  currentOperator={currentOperator} setCurrentOperator={setCurrentOperator}
@@ -6093,9 +6362,6 @@ function CaseStorageMigrationTool({ casesStorageMode, caseCount }) {
 }
 function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdminAccount }) {
  const [editing, setEditing] = useState(null);
- // Staff Accounts is already limited to operators with canManageSettings (see AdminArea), so the
- // admin can read every password here instead of opening each account one by one.
- const [showPasswords, setShowPasswords] = useState(false);
  if (editing) {
  return (
  <div>
@@ -6115,10 +6381,7 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  return (
  <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
- <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
  <div style={{ fontSize: 12, color: "#9AA2AD" }}> {adminDirectory.length} — Case</div>
- <button onClick={() => setShowPasswords(s => !s)} style={btnGhost}>{showPasswords ? "Hide passwords" : "Show passwords"}</button>
- </div>
  <button onClick={() => setEditing({ isNew: true, account: emptyAdminAccount() })} style={btnPrimary}><Plus size={14}/> </button>
  </div>
  {adminDirectory.length === 0 ? (
@@ -6133,7 +6396,6 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  <th style={thStyle}> Name</th>
  <th style={thStyle}>Email</th>
  <th style={thStyle}> Phone</th>
- <th style={thStyle}>Password</th>
  <th style={thStyle}></th>
  </tr>
  </thead>
@@ -6145,7 +6407,6 @@ function AdminAccountDirectoryArea({ adminDirectory, saveAdminAccount, deleteAdm
  <td style={{ ...tdStyle, fontWeight: 600 }}>{a.name}</td>
  <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>{a.email || "-"}</td>
  <td style={tdStyle}>{a.phone || "-"}</td>
- <td style={{ ...tdStyle, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}>{showPasswords ? (a.password || "-") : "••••••"}</td>
  <td style={tdStyle}>{a.note || "-"}</td>
  </tr>
  ))}
@@ -6576,7 +6837,7 @@ function ShipmentBatchArea({ batches, saveBatch, deleteBatch, cases }) {
 // stages). Picking a customer pulls in everything that case is entitled to ship; the Ordered /
 // Shipped elsewhere / Remaining columns come straight from every other DO already on file for
 // that same case, so Admin always sees exactly what's still outstanding.
-function DeliveryOrderArea({ deliveryOrders, saveDO, deleteDO, cases, agentDirectory }) {
+function DeliveryOrderArea({ deliveryOrders, saveDO, deleteDO, patchCaseInstallSchedule, cases, agentDirectory }) {
  const [openId, setOpenId] = useState(null);
  const [customerQuery, setCustomerQuery] = useState("");
  const setPrintDoc = useContext(PrintContext);
@@ -6687,6 +6948,24 @@ function DeliveryOrderArea({ deliveryOrders, saveDO, deleteDO, cases, agentDirec
  <Field label="DO Date">
  <DateInputDMY value={openDO.date} onChange={e => setField("date", e.target.value)} style={{ maxWidth: 200 }} />
  </Field>
+
+ {caseObj && (
+ <>
+ <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>INSTALLATION SCHEDULE (printed on this DO)</div>
+ <div style={{ display: "grid", gridTemplateColumns: "180px 170px 130px", gap: 10 }}>
+ <Field label="Installation Date">
+ <DateInputDMY value={caseObj.install.deliveryDate} onChange={e => patchCaseInstallSchedule(caseObj.id, { deliveryDate: e.target.value })} />
+ </Field>
+ <Field label="Time Slot">
+ <Select value={caseObj.delivery.installTimeSlot} onChange={e => patchCaseInstallSchedule(caseObj.id, { installTimeSlot: e.target.value })}
+ options={[{ value: "", label: "Not Set" }, "Morning (AM)", "Afternoon (PM)", "Full Day"]} />
+ </Field>
+ <Field label="Time">
+ <TextInput value={caseObj.delivery.installTime} onChange={e => patchCaseInstallSchedule(caseObj.id, { installTime: e.target.value })} placeholder="10.00am" />
+ </Field>
+ </div>
+ </>
+ )}
 
  <div style={{ fontSize: 11, fontWeight: 700, color: "#9AA2AD", letterSpacing: 0.5, marginTop: 4 }}>DELIVERY ADDRESS</div>
  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -6960,7 +7239,7 @@ function ItemPicker({ category, itemDirectory, model, onModelChange, onDescripti
  );
 }
 
-function AdminArea({ cases, deletedCases, restoreCase, view, setView, search, setSearch, agentFilter, setAgentFilter, agents, listRangeStart, setListRangeStart, listRangeEnd, setListRangeEnd, filteredAdminList, openNew, openEdit, saveCase, deleteCase, agentDirectory, saveAgent, deleteAgent, itemDirectory, saveItem, deleteItem, shipmentBatches, saveBatch, deleteBatch, deliveryOrders, saveDO, deleteDO, docLogs, logDoc, adminDirectory, saveAdminAccount, deleteAdminAccount, currentOperator, setCurrentOperator, casesStorageMode, requireLogin }) {
+function AdminArea({ cases, deletedCases, restoreCase, view, setView, search, setSearch, agentFilter, setAgentFilter, agents, listRangeStart, setListRangeStart, listRangeEnd, setListRangeEnd, filteredAdminList, openNew, openEdit, saveCase, deleteCase, agentDirectory, saveAgent, deleteAgent, itemDirectory, saveItem, deleteItem, shipmentBatches, saveBatch, deleteBatch, deliveryOrders, saveDO, deleteDO, patchCaseInstallSchedule, docLogs, logDoc, adminDirectory, saveAdminAccount, deleteAdminAccount, currentOperator, setCurrentOperator, casesStorageMode, requireLogin }) {
  // Agent / Items / Staff Accounts are restricted — clicking prompts the usual staff login if
  // no one's identified yet for this session, then checks the signed-in operator's own
  // canManageSettings flag (set in Staff Accounts) before actually switching the screen.
@@ -6991,6 +7270,7 @@ function AdminArea({ cases, deletedCases, restoreCase, view, setView, search, se
  }}
  agentDirectory={agentDirectory}
  itemDirectory={itemDirectory}
+ existingCases={cases}
  logDoc={logDoc}
  actorName={currentOperator ? currentOperator.name : "Admin"}
  />
@@ -7039,10 +7319,11 @@ function AdminArea({ cases, deletedCases, restoreCase, view, setView, search, se
  ) : view.screen === "batches" ? (
  <ShipmentBatchArea batches={shipmentBatches} saveBatch={saveBatch} deleteBatch={deleteBatch} cases={cases} />
  ) : view.screen === "deliveryOrders" ? (
- <DeliveryOrderArea deliveryOrders={deliveryOrders} saveDO={saveDO} deleteDO={deleteDO} cases={cases} agentDirectory={agentDirectory} />
+ <DeliveryOrderArea deliveryOrders={deliveryOrders} saveDO={saveDO} deleteDO={deleteDO} patchCaseInstallSchedule={patchCaseInstallSchedule} cases={cases} agentDirectory={agentDirectory} />
  ) : view.screen === "admins" ? (
  <>
  <AdminAccountDirectoryArea adminDirectory={adminDirectory || []} saveAdminAccount={saveAdminAccount} deleteAdminAccount={deleteAdminAccount} />
+ <CaseStorageMigrationTool casesStorageMode={casesStorageMode} caseCount={cases.length} />
  </>
  ) : view.screen === "awaiting" ? (
  <>
@@ -7138,7 +7419,7 @@ function AdminCaseTable({ cases, onEdit }) {
  <tbody>
  {cases.map(c => {
  const stage = stageOf(c);
- const dep = firstPaymentDate(c);
+ const dep = salesDateOf(c);
  return (
  <tr key={c.id} onClick={() => onEdit(c)}
  style={{ borderTop: "1px solid #F0ECE1", borderLeft: `4px solid ${PACKAGE_TYPE_COLORS[c.pkg.packageType] || "#9AA2AD"}`, cursor: "pointer" }}
@@ -7326,19 +7607,7 @@ function AgentPortalView({ agentDirectory, cases, logDoc }) {
  );
 }
 
-const LOGO_MARK = "data:image/png;base64,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";
 
-/* ---------- localhost shell ----------
-   Everything above is the GitHub CRM. What follows only exists here: the staff sign-in page that
-   stands in for the Firebase email login, and the desktop app's version / update status. */
-
-// A password field with an eye toggle. Typing blind is where sign-in goes wrong — a stray caps
-// lock or a phone keyboard's autocapitalise looks identical to a wrong password, and the only
-// feedback is "name or password incorrect".
-//
-// Starts hidden and is per-field, so nothing is exposed on a screen someone else can see unless
-// the person at the keyboard asks for it. The button keeps focus in the input (mousedown is
-// swallowed) so Enter still submits instead of re-toggling.
 function PasswordInput({ value, onChange, onKeyDown, placeholder, style, ...rest }) {
  const [shown, setShown] = useState(false);
  return (
@@ -7471,6 +7740,8 @@ function UpdateStatusBar() {
    same database table as the rest of the data, readable by anyone who can open the app, so a determined
    person can read them or bypass this screen. It stops casual and unattributed edits; it does not
    protect the data. */
+const LOGO_MARK = "data:image/png;base64,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";
+
 const OPERATOR_KEY = "casehub.operator";
 
 function SignInPage({ adminDirectory, onSignIn, saveAdminAccount }) {
