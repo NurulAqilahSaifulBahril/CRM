@@ -1022,11 +1022,7 @@ function districtAreaText(c) {
 function buildDepositReportDoc(startDate, endDate, cases) {
  const list = cases.filter(c => {
  if (!inRange(salesDateOf(c), startDate, endDate)) return false;
- const cancelled = c.cancellation && c.cancellation.isCancelled;
- if (cancelled) return true; // cancelled cases always show here (with the cancel date), regardless of how far payment got
- // If this case's payment also crossed 60%/80%/100% within this same date range, it belongs
- // to that threshold report instead — keeps a case from double-counting in both reports.
- return !highestThresholdCrossedInRange(c, startDate, endDate);
+ return true;
  });
  const firstOf = (c) => c.payment.records.slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""))[0];
  const panelOf = (c) => c.pkg.packageType === "Solar Package" && (c.pkg.panelCount || c.pkg.panelSizeW)
